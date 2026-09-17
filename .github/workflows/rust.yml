@@ -44,8 +44,9 @@ jobs:
         run: |
           cd vdpm
           ./bootstrap-vitasdk.sh
-          sudo chmod +x "$VITASDK/bin/pacman" "$VITASDK/bin/vdpm" || true
           export PATH="$VITASDK/bin:$PATH"
+          export VDPM_PACMAN="$VITASDK/libexec/vdpm/pacman"
+          test -x "$VDPM_PACMAN"
           ./install-all.sh
         env:
           VITASDK: /usr/local/vitasdk
