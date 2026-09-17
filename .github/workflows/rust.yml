@@ -47,7 +47,9 @@ jobs:
           export PATH="$VITASDK/bin:$PATH"
           export VDPM_PACMAN="$VITASDK/libexec/vdpm/pacman"
           test -x "$VDPM_PACMAN"
-          ./install-all.sh
+          # The bundled pacman occasionally rejects an exact-size package download.
+          # Retry the package transaction once; cached packages are reused.
+          ./install-all.sh || ./install-all.sh
         env:
           VITASDK: /usr/local/vitasdk
           VDPM_NONINTERACTIVE: 1
