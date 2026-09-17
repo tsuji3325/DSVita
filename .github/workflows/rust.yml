@@ -27,6 +27,10 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Apply Japanese UI
+        if: github.ref_name == 'japanese-ui'
+        run: python3 tools/apply_japanese_ui.py
+
       - name: Install clang 21
         run: curl https://apt.llvm.org/llvm.sh | sudo bash -s -- 21
 
