@@ -50,6 +50,7 @@ jobs:
           ./install-all.sh
         env:
           VITASDK: /usr/local/vitasdk
+          VDPM_NONINTERACTIVE: 1
 
       - name: Install cargo-vita
         run: cargo +nightly install cargo-vita
