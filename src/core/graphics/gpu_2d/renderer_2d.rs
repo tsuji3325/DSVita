@@ -1147,6 +1147,18 @@ impl Gpu2DRenderer {
         }
     }
 
+    pub unsafe fn blend_a_snapshot(&mut self, mem_refs: &GpuMemRefs, regs: &Gpu2DRenderRegs, fbo_3d: Option<&Gpu3DFbo>) -> GLuint {
+        self.program.blend_fbos(
+            &self.common,
+            regs,
+            &self.texs[0],
+            &Gpu2DMem::new::<{ A }>(mem_refs),
+            self.common.blend_programs[A],
+            &mut self.blend_fbos[0],
+            fbo_3d,
+        )
+    }
+
     pub unsafe fn blend<const ENGINE: Gpu2DEngine>(&mut self, mem_refs: &GpuMemRefs, regs: &Gpu2DRenderRegsShared, fbo_3d: Option<&Gpu3DFbo>) -> GLuint {
         match ENGINE {
             A => self.program.blend_fbos(

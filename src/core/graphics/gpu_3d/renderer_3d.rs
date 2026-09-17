@@ -1008,20 +1008,21 @@ impl Gpu3DRenderer {
         }
     }
 
-    pub unsafe fn render(&mut self, common: &GpuRendererCommon, upscale_factor_index: u8, widescreen: WidescreenOption, widescreen_coefficient: f32) {
+    /// Finish the published frame's texture ownership while the old handoff is still exclusive.
+    /// After this returns, render() only consumes frame-local GLuints and GL scratch state.
+    pub unsafe fn finalize_prepared_frame_for_render(&mut self) {
         let frame_index = self.render_frame_index;
-        let frame_pow_cnt1 = self.prepared_frames[frame_index].pow_cnt1;
-        let frame_swap_buffers = self.prepared_frames[frame_index].swap_buffers;
-        if frame_pow_cnt1 != common.pow_cnt1[0] {
-            return;
-        }
-
         if !self.texture_ids_to_delete.is_empty() {
             gl::DeleteTextures(self.texture_ids_to_delete.len() as _, self.texture_ids_to_delete.as_ptr());
             self.texture_ids_to_delete.clear();
         }
-
         self.resolve_prepared_texture_ids(frame_index);
+    }
+
+    pub unsafe fn render(&mut self, upscale_factor_index: u8, widescreen: WidescreenOption, widescreen_coefficient: f32) {
+        let frame_index = self.render_frame_index;
+        let frame_pow_cnt1 = self.prepared_frames[frame_index].pow_cnt1;
+        let frame_swap_buffers = self.prepared_frames[frame_index].swap_buffers;
 
         let fbo = self.get_fbo(frame_pow_cnt1.display_swap(), upscale_factor_index, widescreen, widescreen_coefficient);
         gl::BindFramebuffer(gl::FRAMEBUFFER, fbo.fbo());

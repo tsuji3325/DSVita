@@ -3,7 +3,7 @@ use crate::core::graphics::gl_utils::GpuFbo;
 use crate::core::graphics::gpu::{DispCapCnt, PowCnt1, DISPLAY_HEIGHT, DISPLAY_WIDTH};
 use crate::core::graphics::gpu_2d::registers_2d::Gpu2DRegisters;
 use crate::core::graphics::gpu_2d::renderer_2d::Gpu2DRenderer;
-use crate::core::graphics::gpu_2d::renderer_regs_2d::Gpu2DRenderRegsShared;
+use crate::core::graphics::gpu_2d::renderer_regs_2d::{Gpu2DRenderRegs, Gpu2DRenderRegsShared};
 use crate::core::graphics::gpu_2d::renderer_soft_2d::Gpu2DSoftRenderer;
 use crate::core::graphics::gpu_2d::Gpu2DEngine::{A, B};
 use crate::core::graphics::gpu_3d::registers_3d::Gpu3DRegisters;
@@ -19,7 +19,7 @@ use crate::ra_context::RaContext;
 use crate::screen_layouts::ScreenLayout;
 use crate::screen_overlays;
 use crate::settings::Settings;
-use crate::utils::HeapArrayU8;
+use crate::utils::{HeapArrayU8, HeapMem};
 use gl::types::{GLint, GLuint};
 use glyph_brush::{HorizontalAlign, Layout, VerticalAlign};
 use png::{BitDepth, ColorType};
@@ -133,6 +133,9 @@ fn trace_2d(what: Trace2D) {
 
 pub struct GpuRenderer {
     renderer_regs_2d_shared: Gpu2DRenderRegsShared,
+    // Current engine-A scanline state pinned before an early handoff. This lets the CPU publish
+    // the next frame while the render thread is still drawing/blending the current 3D frame.
+    regs_a_render_snapshot: HeapMem<Gpu2DRenderRegs>,
     renderer_2d: Gpu2DRenderer,
     // DSVITA_SOFT_2D=1 (debug builds): scanline-software 2D instead of the GL renderer —
     // the isolation tool for the a64 2D-corruption class of bugs (GL-side vs guest-side).
@@ -266,6 +269,7 @@ impl GpuRenderer {
 
         GpuRenderer {
             renderer_regs_2d_shared: Gpu2DRenderRegsShared::new(),
+            regs_a_render_snapshot: HeapMem::default(),
             renderer_2d: Gpu2DRenderer::new(gpu_programs),
             renderer_soft_2d: (crate::IS_DEBUG && std::env::var("DSVITA_SOFT_2D").is_ok_and(|v| v == "1")).then(Gpu2DSoftRenderer::new),
             renderer_3d: Gpu3DRenderer::new(gpu_programs),
@@ -641,6 +645,20 @@ impl GpuRenderer {
         }
     }
 
+    #[inline]
+    fn release_frame_handoff(&mut self, pause: bool) {
+        self.pause = pause;
+        {
+            let mut rendering = self.rendering.lock().unwrap();
+            *rendering = false;
+        }
+        {
+            let mut processed_3d = self.processed_3d.lock().unwrap();
+            *processed_3d = false;
+            self.processed_3d_condvar.notify_one();
+        }
+    }
+
     pub fn render_loop(
         &mut self,
         presenter: &mut Presenter,
@@ -666,6 +684,10 @@ impl GpuRenderer {
             let rendering = self.rendering.lock().unwrap();
             let _drawing = self.rendering_condvar.wait_while(rendering, |rendering| !*rendering).unwrap();
         }
+
+        // Keep all post-handoff presentation decisions tied to this frame even if the CPU
+        // publishes the next frame early while we are still drawing this one.
+        let frame_pow_cnt1 = self.common.pow_cnt1[0];
 
         if self.rendering_3d {
             self.renderer_3d.set_tex_ptrs(&mut self.gpu_mem_refs);
@@ -709,7 +731,9 @@ impl GpuRenderer {
                 b_fbo_color
             };
 
-            if self.rendering_3d {
+            let had_3d = self.rendering_3d;
+            let mut handoff_released = false;
+            if had_3d {
                 self.rendering_3d = false;
                 let processed_3d = self.processed_3d.lock().unwrap();
                 let (_processed_3d, timeout) = self
@@ -719,15 +743,34 @@ impl GpuRenderer {
                 if unlikely(timeout.timed_out()) {
                     info_println!("waiting for 3d processing timed out");
                 }
-                self.renderer_3d.render(&self.common, upscale_3d_factor_index, widescreen, widescreen_coefficient);
+                drop(_processed_3d);
+
+                // Resolve all cache-backed texture references before the producer is allowed to
+                // advance. The current Prepared3DFrame is now self-contained for rendering.
+                self.renderer_3d.finalize_prepared_frame_for_render();
+
+                // Release builds can hand the producer the next frame here. Engine-A's scanline
+                // registers are pinned first because on_scanline_finish() rotates those buffers.
+                // The worker can transform/assemble N+1 on Core1 while the GL thread renders N.
+                // It will stop at vram_ready until the next render_loop, so TextureCache/GL ids
+                // cannot be mutated concurrently with this frame's draw.
+                if !pause && !crate::IS_DEBUG && self.renderer_soft_2d.is_none() {
+                    self.regs_a_render_snapshot.clone_from(&*self.renderer_regs_2d_shared.regs_a[0]);
+                    self.release_frame_handoff(false);
+                    handoff_released = true;
+                }
+
+                self.renderer_3d.render(upscale_3d_factor_index, widescreen, widescreen_coefficient);
             }
 
             let fbo_3d = self
                 .renderer_3d
-                .get_fbo(self.common.pow_cnt1[0].display_swap(), upscale_3d_factor_index, widescreen, widescreen_coefficient);
+                .get_fbo(frame_pow_cnt1.display_swap(), upscale_3d_factor_index, widescreen, widescreen_coefficient);
             let a_fbo_color = if self.renderer_soft_2d.is_some() {
                 let color_3d = fbo_3d.color();
                 self.renderer_soft_2d.as_mut().unwrap().blend::<{ A }>(&self.common, &self.renderer_regs_2d_shared, color_3d)
+            } else if handoff_released {
+                self.renderer_2d.blend_a_snapshot(&self.gpu_mem_refs, &self.regs_a_render_snapshot, Some(fbo_3d))
             } else {
                 self.renderer_2d.blend::<{ A }>(&self.gpu_mem_refs, &self.renderer_regs_2d_shared, Some(fbo_3d))
             };
@@ -790,7 +833,7 @@ impl GpuRenderer {
                 gl::UseProgram(self.capture_program);
 
                 gl::ActiveTexture(gl::TEXTURE0);
-                gl::BindTexture(gl::TEXTURE_2D, if self.common.pow_cnt1[0].display_swap() { a_fbo_color } else { b_fbo_color });
+                gl::BindTexture(gl::TEXTURE_2D, if frame_pow_cnt1.display_swap() { a_fbo_color } else { b_fbo_color });
 
                 gl::Uniform2f(self.capture_size_scalers_uniform, 1.0, 1.0);
 
@@ -815,8 +858,8 @@ impl GpuRenderer {
                 self.draw_overlay(screen_layout);
             }
 
-            if self.common.pow_cnt1[0].enable() {
-                let top_screen = if self.common.pow_cnt1[0].display_swap() {
+            if frame_pow_cnt1.enable() {
+                let top_screen = if frame_pow_cnt1.display_swap() {
                     screen_layout.get_screen_top()
                 } else {
                     screen_layout.get_screen_bottom()
@@ -825,7 +868,7 @@ impl GpuRenderer {
                 let is_physical_top = top_screen.2;
                 let top_screen = (a_fbo_color, top_screen.0, if is_physical_top { widescreen_coefficient } else { 1.0 }, top_screen.1);
 
-                let bottom_screen = if self.common.pow_cnt1[0].display_swap() {
+                let bottom_screen = if frame_pow_cnt1.display_swap() {
                     screen_layout.get_screen_bottom()
                 } else {
                     screen_layout.get_screen_top()
@@ -973,16 +1016,8 @@ impl GpuRenderer {
                 presenter.gl_swap_window();
             }
 
-            {
-                self.pause = pause;
-                let mut rendering = self.rendering.lock().unwrap();
-                *rendering = false;
-            }
-
-            {
-                let mut processed_3d = self.processed_3d.lock().unwrap();
-                *processed_3d = false;
-                self.processed_3d_condvar.notify_one();
+            if !handoff_released {
+                self.release_frame_handoff(pause);
             }
 
             if disp_cap_cnt.capture_enabled() && u8::from(disp_cap_cnt.capture_source()) != 1 {
