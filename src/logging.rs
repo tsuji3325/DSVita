@@ -6,6 +6,50 @@ lazy_static::lazy_static! {
     };
 }
 
+
+#[cfg(target_os = "vita")]
+const STABILITY_LOG_FILE: &str = "ux0:data/dsvita/log/stability.log";
+
+/// Best-effort, low-frequency diagnostics for crashes and emergency exits.
+#[cfg(target_os = "vita")]
+pub fn stability_event(message: &str) {
+    use std::io::Write;
+
+    let _ = std::fs::create_dir_all(crate::presenter::LOG_PATH);
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(STABILITY_LOG_FILE) {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let current = std::thread::current();
+        let thread_name = current.name().unwrap_or("<unnamed>");
+        let _ = writeln!(file, "[{stamp}] [{thread_name}] {message}");
+        let _ = file.flush();
+    }
+}
+
+/// Install a release-safe Vita panic hook. The release profile aborts, but Rust still
+/// invokes the panic hook first, giving us a chance to persist the failure reason.
+#[cfg(target_os = "vita")]
+pub fn install_stability_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let message = if let Some(s) = info.payload().downcast_ref::<&'static str>() {
+            *s
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.as_str()
+        } else {
+            "<non-string panic payload>"
+        };
+        stability_event(&format!("PANIC at {location}: {message}"));
+        default_hook(info);
+    }));
+}
+
 macro_rules! debug_println {
     ($($args:tt)*) => {
         if crate::DEBUG_LOG {

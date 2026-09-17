@@ -306,6 +306,13 @@ pub fn actual_main() {
         set_thread_prio_affinity(ThreadPriority::High, &[ThreadAffinity::Core0]);
     }
 
+    #[cfg(target_os = "vita")]
+    {
+        logging::install_stability_panic_hook();
+        logging::stability_event("DSVita startup");
+        presenter::start_emergency_exit_watchdog();
+    }
+
     info_println!("Starting DSVita");
 
     if IS_DEBUG {
@@ -362,24 +369,6 @@ pub fn actual_main() {
             eprintln!();
         }));
 
-        #[cfg(target_os = "vita")]
-        {
-            let default_hook = std::panic::take_hook();
-            std::panic::set_hook(Box::new(move |info| {
-                let location = info.location().unwrap();
-
-                let msg = match info.payload().downcast_ref::<&'static str>() {
-                    Some(s) => *s,
-                    None => match info.payload().downcast_ref::<String>() {
-                        Some(s) => &s[..],
-                        None => "Box<Any>",
-                    },
-                };
-                info_println!("panicked at {location}: '{msg}'");
-
-                default_hook(info);
-            }));
-        }
     }
 
     let presenter = Presenter::new();
@@ -474,6 +463,8 @@ pub fn actual_main() {
         presenter.set_key_mapping(global_settings.get_control(settings.controls_index()));
 
         info_println!("{} Settings: {settings:?}", cartridge_io.file_name);
+        #[cfg(target_os = "vita")]
+        logging::stability_event(&format!("Launching ROM: {}", cartridge_io.file_name));
 
         presenter.on_game_launched();
 

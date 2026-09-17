@@ -34,6 +34,58 @@ const ROM_PATH: &str = "ux0:data/dsvita";
 pub const LOG_PATH: &str = "ux0:data/dsvita/log";
 pub const LOG_FILE: &str = "ux0:data/dsvita/log/log.txt";
 
+static EMERGENCY_EXIT_WATCHDOG: std::sync::Once = std::sync::Once::new();
+
+/// Last-resort escape hatch for emulator hangs that leave the normal UI unresponsive.
+/// Hold L + R + START + SELECT for three seconds to terminate only DSVita.
+pub fn start_emergency_exit_watchdog() {
+    EMERGENCY_EXIT_WATCHDOG.call_once(|| {
+        let result = std::thread::Builder::new()
+            .name("emergency_exit".to_string())
+            .stack_size(64 * 1024)
+            .spawn(|| {
+                const EXIT_COMBO: u32 = SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER | SCE_CTRL_START | SCE_CTRL_SELECT;
+                let mut held_since: Option<std::time::Instant> = None;
+                loop {
+                    let pressed = unsafe {
+                        let mut data = std::mem::MaybeUninit::<SceCtrlData>::zeroed().assume_init();
+                        if sceCtrlPeekBufferPositive(0, &mut data, 1) > 0 {
+                            data.buttons
+                        } else {
+                            0
+                        }
+                    };
+
+                    if pressed & EXIT_COMBO == EXIT_COMBO {
+                        let since = held_since.get_or_insert_with(std::time::Instant::now);
+                        if since.elapsed() >= std::time::Duration::from_secs(3) {
+                            crate::logging::stability_event("EMERGENCY EXIT: L+R+START+SELECT held for 3 seconds");
+                            unsafe {
+                                sceShellUtilUnlock(
+                                    SCE_SHELL_UTIL_LOCK_TYPE_PS_BTN
+                                        | SCE_SHELL_UTIL_LOCK_TYPE_QUICK_MENU
+                                        | SCE_SHELL_UTIL_LOCK_TYPE_USB_CONNECTION
+                                        | SCE_SHELL_UTIL_LOCK_TYPE_PS_BTN_2,
+                                );
+                                sceKernelExitProcess(2);
+                            }
+                            return;
+                        }
+                    } else {
+                        held_since = None;
+                    }
+
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            });
+
+        if let Err(err) = result {
+            crate::logging::stability_event(&format!("Failed to start emergency exit watchdog: {err}"));
+        }
+    });
+}
+
+
 #[link(name = "taihen_stub", kind = "static", modifiers = "+whole-archive")]
 #[link(name = "SceShaccCgExt", kind = "static", modifiers = "+whole-archive")]
 #[link(name = "mathneon", kind = "static", modifiers = "+whole-archive")]
