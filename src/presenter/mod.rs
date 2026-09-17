@@ -2,6 +2,10 @@ pub use self::platform::*;
 // CJK font download + ImGui atlas merge — Android's Activity UI renders CJK natively.
 #[cfg(not(target_os = "android"))]
 pub mod cjk_font;
+// Display-only Japanese translation catalog. Internal setting keys stay English
+// so existing settings files remain compatible.
+#[cfg(not(target_os = "android"))]
+pub mod ja_jp;
 // Android renders no native UI at all — menus/dialogs are the Activity's job (Java),
 // so the ImGui-based ui module and its bindings only exist off-Android.
 #[cfg(not(target_os = "android"))]
