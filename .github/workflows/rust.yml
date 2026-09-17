@@ -47,9 +47,10 @@ jobs:
           export PATH="$VITASDK/bin:$PATH"
           export VDPM_PACMAN="$VITASDK/libexec/vdpm/pacman"
           test -x "$VDPM_PACMAN"
-          # Current install-all mixes OpenSSL 1.0 and 1.1 packages. Allow pacman
-          # to replace the conflicting package automatically in unattended CI.
-          printf 'y\n' | ./install-all.sh
+          # install-all currently transitions from OpenSSL 1.0 to 1.1 partway
+          # through the package list. Feed yes continuously so pacman can both
+          # confirm installs and replace the conflicting old package in CI.
+          yes y | ./install-all.sh
         env:
           VITASDK: /usr/local/vitasdk
           VDPM_NONINTERACTIVE: 1
