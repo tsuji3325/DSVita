@@ -504,6 +504,21 @@ offset once per straight-line run, re-resolve on 4KB page cross or jump), cached
 pointer in the dispatch context, the flat loop for cold branch targets, the AL-condition
 fast path, batched ldm/stm, store-only breakout checks.
 
+### Adaptive cold-to-JIT promotion (stability-dev)
+
+The baseline cold threshold remains 100 so one-shot boot and error-path code does not consume
+JIT capacity. The interpreter now promotes two high-confidence hotness shapes without changing
+guest timing or instruction semantics:
+
+- backward branches <=4 KiB promote the loop header to need about 9 more entries before JIT;
+- backward branches <=64 KiB use a conservative ~21 more entries;
+- function targets are promoted only after 12 observed entries, then need about 25 more.
+
+INTERP_THRESHOLD=0 and 255 retain their pure-JIT / always-interpret A/B meanings. Required
+compile-time HLE substitutions still pass through the existing gates; this only changes when
+ordinary hot blocks cross the same compiler path. Keep this change isolated and judge it on Vita
+hardware by frame pacing / throughput before tuning the constants further.
+
 ### Link-time hot/cold symbol ordering (July 2026 — pi-verified mechanism, vita verdict pending)
 
 `build.rs` passes `-Wl,--symbol-ordering-file=tools/symbol_order/<target-triple>.txt` to lld
