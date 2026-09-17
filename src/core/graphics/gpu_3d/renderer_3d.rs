@@ -1,6 +1,6 @@
 use crate::core::graphics::gl_utils::GpuFbo;
 use crate::core::graphics::gpu::{PowCnt1, DISPLAY_HEIGHT, DISPLAY_WIDTH};
-use crate::core::graphics::gpu_3d::registers_3d::{Gpu3DBuffer, Gpu3DRegisters, PolygonAttr, PolygonMode, PrimitiveType, TexImageParam, TextureCoordTransMode, TextureFormat, Vertex, Viewport};
+use crate::core::graphics::gpu_3d::registers_3d::{Gpu3DBuffer, Gpu3DRegisters, PolygonAttr, PolygonMode, PrimitiveType, SwapBuffers, TexImageParam, TextureCoordTransMode, TextureFormat, Vertex, Viewport};
 use crate::core::graphics::gpu_3d::registers_3d::{POLYGON_LIMIT, VERTEX_LIMIT};
 use crate::core::graphics::gpu_3d::texture_cache::{Texture3D, Texture3DCache};
 use crate::core::graphics::gpu_mem_buf::{GpuMemBuf, GpuMemRefs};
@@ -265,7 +265,7 @@ impl From<PolygonAttr> for Gpu3DDrawAttr {
     }
 }
 
-#[derive(Default)]
+#[derive(Copy, Clone, Default)]
 pub struct Gpu3DDraw {
     vertex_start_index: u16,
     vertex_count: u16,
@@ -279,6 +279,43 @@ pub struct Gpu3DDraw {
 impl Gpu3DDraw {
     pub fn key(&self) -> u64 {
         self.tex_image_param.key() as u64 | ((self.pal_addr as u64) << 32)
+    }
+}
+
+/// CPU-prepared 3D state for one DS frame.
+///
+/// Two instances are kept so the worker can eventually prepare frame N+1 while the
+/// render thread consumes frame N. Stage A keeps the existing synchronization, but
+/// all frame-owned geometry/state is isolated here instead of the shared scratch state.
+struct Prepared3DFrame {
+    assembled_draws: HeapArray<Gpu3DDraw, POLYGON_LIMIT>,
+    assembled_draw_count: u16,
+    vertices: HeapArray<Vertex, VERTEX_LIMIT>,
+    vertices_count: u16,
+    inner: Gpu3DRendererInner,
+    pow_cnt1: PowCnt1,
+    swap_buffers: SwapBuffers,
+}
+
+impl Default for Prepared3DFrame {
+    fn default() -> Self {
+        Self {
+            assembled_draws: HeapArray::default(),
+            assembled_draw_count: 0,
+            vertices: HeapArray::default(),
+            vertices_count: 0,
+            inner: Gpu3DRendererInner::default(),
+            pow_cnt1: PowCnt1::from(0),
+            swap_buffers: SwapBuffers::default(),
+        }
+    }
+}
+
+impl Prepared3DFrame {
+    #[inline]
+    fn reset_for_prepare(&mut self) {
+        self.assembled_draw_count = 0;
+        self.vertices_count = 0;
     }
 }
 
@@ -296,8 +333,9 @@ pub struct Gpu3DRenderer {
     buffer: HeapMem<Gpu3DBuffer>,
     gl: Gpu3DGl,
 
-    assembled_draws: HeapArray<Gpu3DDraw, POLYGON_LIMIT>,
-    assembled_draw_count: u16,
+    prepared_frames: [Prepared3DFrame; 2],
+    prepare_frame_index: usize,
+    render_frame_index: usize,
 
     translucent_polygons: Vec<u16>,
 
@@ -335,8 +373,9 @@ impl Gpu3DRenderer {
             buffer: Default::default(),
             gl: Gpu3DGl::new(gpu_programs),
 
-            assembled_draws: HeapArray::default(),
-            assembled_draw_count: 0,
+            prepared_frames: [Prepared3DFrame::default(), Prepared3DFrame::default()],
+            prepare_frame_index: 0,
+            render_frame_index: 1,
 
             translucent_polygons: Vec::new(),
 
@@ -368,6 +407,10 @@ impl Gpu3DRenderer {
         self.inners[1] = Gpu3DRendererInner::default();
         self.buffer.reset_all();
         self.buffer.pow_cnt1 = PowCnt1::from(0);
+        self.prepare_frame_index = 0;
+        self.render_frame_index = 1;
+        self.prepared_frames[0] = Prepared3DFrame::default();
+        self.prepared_frames[1] = Prepared3DFrame::default();
         self.texture_cache.clear();
 
         unsafe {
@@ -551,11 +594,13 @@ impl Gpu3DRenderer {
         }
     }
 
-    unsafe fn assemble_draws(&mut self) {
-        self.assembled_draw_count = 0;
+    unsafe fn assemble_draws(&mut self, frame_index: usize) {
+        let buffer = &self.buffer;
+        let frame = &mut self.prepared_frames[frame_index];
+        frame.assembled_draw_count = 0;
 
-        let add_draw = |instance: &mut Self, vertex_start_index, vertex_count, polygon_attr, tex_image_param, pal_addr, viewport| {
-            *instance.assembled_draws.get_unchecked_mut(instance.assembled_draw_count as usize) = Gpu3DDraw {
+        let add_draw = |frame: &mut Prepared3DFrame, vertex_start_index, vertex_count, polygon_attr, tex_image_param, pal_addr, viewport| {
+            *frame.assembled_draws.get_unchecked_mut(frame.assembled_draw_count as usize) = Gpu3DDraw {
                 vertex_start_index,
                 vertex_count,
                 attr: polygon_attr,
@@ -565,8 +610,8 @@ impl Gpu3DRenderer {
                 texture_3d_ptr: ptr::null_mut(),
             };
 
-            instance.assembled_draw_count += 1;
-            instance.assembled_draw_count != POLYGON_LIMIT as u16
+            frame.assembled_draw_count += 1;
+            frame.assembled_draw_count != POLYGON_LIMIT as u16
         };
 
         let mut viewport = MaybeUninit::uninit().assume_init();
@@ -575,8 +620,8 @@ impl Gpu3DRenderer {
         let mut tex_image_param = MaybeUninit::uninit().assume_init();
         let mut pal_addr = MaybeUninit::uninit().assume_init();
 
-        for i in 0..self.buffer.vertices_count {
-            let vertex = self.buffer.vertices.get_unchecked(i as usize);
+        for i in 0..buffer.vertices_count {
+            let vertex = buffer.vertices.get_unchecked(i as usize);
             assert_unchecked(i != 0 || vertex.data.begin_vtxs());
 
             let begin_vtxs = vertex.data.begin_vtxs();
@@ -588,11 +633,11 @@ impl Gpu3DRenderer {
                     PrimitiveType::QuadliteralStrips => draw_vertex_count >= 4 && draw_vertex_count % 2 == 0,
                     _ => false,
                 };
-                if draw_complete && !add_draw(self, i - draw_vertex_count, draw_vertex_count, polygon_attr, tex_image_param, pal_addr, viewport) {
+                if draw_complete && !add_draw(frame, i - draw_vertex_count, draw_vertex_count, polygon_attr, tex_image_param, pal_addr, viewport) {
                     return;
                 }
 
-                let polygon = self.buffer.polygons.get_unchecked(polygon_index as usize);
+                let polygon = buffer.polygons.get_unchecked(polygon_index as usize);
                 viewport = polygon.viewport;
                 polygon_attr = polygon.attr;
                 draw_vertex_count = 0;
@@ -613,9 +658,9 @@ impl Gpu3DRenderer {
                 _ => false,
             };
             if draw_complete {
-                let polygon = self.buffer.polygons.get_unchecked(polygon_index as usize);
+                let polygon = buffer.polygons.get_unchecked(polygon_index as usize);
                 if !add_draw(
-                    self,
+                    frame,
                     i + 1 - polygon_attr.primitive_type().vertex_count() as u16,
                     polygon_attr.primitive_type().vertex_count() as u16,
                     polygon_attr,
@@ -635,8 +680,8 @@ impl Gpu3DRenderer {
         };
         if draw_complete {
             add_draw(
-                self,
-                self.buffer.vertices_count - draw_vertex_count,
+                frame,
+                buffer.vertices_count - draw_vertex_count,
                 draw_vertex_count,
                 polygon_attr,
                 tex_image_param,
@@ -662,9 +707,9 @@ impl Gpu3DRenderer {
         }
     }
 
-    unsafe fn add_vertices<const TRANSLUCENT_ONLY: bool>(&mut self, draw_index: u16) {
+    unsafe fn add_vertices<const TRANSLUCENT_ONLY: bool>(&mut self, frame_index: usize, draw_index: u16) {
         assert_unchecked((draw_index as usize) < POLYGON_LIMIT);
-        let draw = &self.assembled_draws[draw_index as usize];
+        let draw = self.prepared_frames[frame_index].assembled_draws[draw_index as usize];
         let primitive_type = draw.attr.primitive_type();
 
         // println!(
@@ -690,7 +735,7 @@ impl Gpu3DRenderer {
             self.active_polygon_attr = draw_attr;
         }
 
-        let draw = &self.assembled_draws[draw_index as usize];
+        let draw = self.prepared_frames[frame_index].assembled_draws[draw_index as usize];
 
         let push_indices = |indices_buf: &mut Vec<u16>, vertex_index: u16, vertex_count: u16| match primitive_type {
             PrimitiveType::SeparateTriangles => indices_buf.extend(&[vertex_index, vertex_index + 1, vertex_index + 2]),
@@ -721,14 +766,14 @@ impl Gpu3DRenderer {
         // spans twice the depth range, thus double the margin. W-buffering applies the bias to the
         // fragment depth in the shader instead.
         const Z_EQUAL_MARGIN: f32 = 2.0 * 0x200 as f32 / 0xFFFFFF as f32;
-        let z_bias = if draw.attr.depth_test_equal() && !self.buffer.swap_buffers.depth_buffering_w() {
+        let z_bias = if draw.attr.depth_test_equal() && !self.prepared_frames[frame_index].swap_buffers.depth_buffering_w() {
             Z_EQUAL_MARGIN
         } else {
             0.0
         };
 
         for i in draw.vertex_start_index..draw.vertex_start_index + draw.vertex_count {
-            let vertex = self.buffer.vertices.get_unchecked(i as usize);
+            let vertex = self.prepared_frames[frame_index].vertices.get_unchecked(i as usize);
 
             let color = u16::from(vertex.data.color());
 
@@ -748,13 +793,14 @@ impl Gpu3DRenderer {
         }
     }
 
-    pub unsafe fn populate_tex_cache(&mut self, mem_buf: &mut GpuMemBuf, mem_refs: &GpuMemRefs) {
+    pub unsafe fn populate_tex_cache(&mut self, frame_index: usize, mem_buf: &mut GpuMemBuf, mem_refs: &GpuMemRefs) {
         self.texture_cache.mark_dirty(mem_buf, mem_refs);
 
         let mut last_value = u64::MAX;
         let mut last_texture_3d_ptr = ptr::null_mut();
-        for i in 0..self.assembled_draw_count {
-            let draw = self.assembled_draws.get_unchecked_mut(i as usize);
+        let frame = &mut self.prepared_frames[frame_index];
+        for i in 0..frame.assembled_draw_count {
+            let draw = frame.assembled_draws.get_unchecked_mut(i as usize);
             if unlikely(draw.tex_image_param.format() == TextureFormat::None) {
                 continue;
             }
@@ -772,16 +818,36 @@ impl Gpu3DRenderer {
     }
 
     pub unsafe fn process_polygons(&mut self, common: &mut GpuRendererCommon, mem_refs: &GpuMemRefs) {
+        let frame_index = self.prepare_frame_index;
+        self.prepared_frames[frame_index].reset_for_prepare();
+        self.prepared_frames[frame_index].pow_cnt1 = self.buffer.pow_cnt1;
+        self.prepared_frames[frame_index].swap_buffers = self.buffer.swap_buffers;
+        self.prepared_frames[frame_index].inner = self.inners[0].clone();
+
         if self.buffer.pow_cnt1 != common.pow_cnt1[0] {
+            self.render_frame_index = frame_index;
+            self.prepare_frame_index ^= 1;
             return;
         }
 
         self.process_vertices();
-        self.assemble_draws();
+        self.assemble_draws(frame_index);
+
+        let vertex_count = self.buffer.vertices_count;
+        {
+            let frame = &mut self.prepared_frames[frame_index];
+            frame.vertices_count = vertex_count;
+            for i in 0..vertex_count {
+                *frame.vertices.get_unchecked_mut(i as usize) = *self.buffer.vertices.get_unchecked(i as usize);
+            }
+        }
         self.buffer.vertices_count = 0;
 
         while !self.vram_ready.load(Ordering::SeqCst) {}
-        self.populate_tex_cache(&mut common.mem_buf, mem_refs);
+        self.populate_tex_cache(frame_index, &mut common.mem_buf, mem_refs);
+
+        self.render_frame_index = frame_index;
+        self.prepare_frame_index ^= 1;
     }
 
     pub fn on_render_start(&self) {
@@ -915,7 +981,10 @@ impl Gpu3DRenderer {
     }
 
     pub unsafe fn render(&mut self, common: &GpuRendererCommon, upscale_factor_index: u8, widescreen: WidescreenOption, widescreen_coefficient: f32) {
-        if self.buffer.pow_cnt1 != common.pow_cnt1[0] {
+        let frame_index = self.render_frame_index;
+        let frame_pow_cnt1 = self.prepared_frames[frame_index].pow_cnt1;
+        let frame_swap_buffers = self.prepared_frames[frame_index].swap_buffers;
+        if frame_pow_cnt1 != common.pow_cnt1[0] {
             return;
         }
 
@@ -924,13 +993,13 @@ impl Gpu3DRenderer {
             self.texture_ids_to_delete.clear();
         }
 
-        let fbo = self.get_fbo(self.buffer.pow_cnt1.display_swap(), upscale_factor_index, widescreen, widescreen_coefficient);
+        let fbo = self.get_fbo(frame_pow_cnt1.display_swap(), upscale_factor_index, widescreen, widescreen_coefficient);
         gl::BindFramebuffer(gl::FRAMEBUFFER, fbo.fbo());
         gl::Viewport(0, 0, fbo.inner.width as _, fbo.inner.height as _);
 
         let guest_width = fbo.guest_width;
 
-        let [r, g, b, a] = self.inners[0].clear_colorf;
+        let [r, g, b, a] = self.prepared_frames[frame_index].inner.clear_colorf;
         gl::ClearColor(r, g, b, a);
 
         // gl::ClearDepth(self.inners[0].clear_depthf as _);
@@ -938,7 +1007,8 @@ impl Gpu3DRenderer {
         gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT | gl::STENCIL_BUFFER_BIT);
 
         self.vertices_buf_count = 0;
-        if self.assembled_draw_count == 0 {
+        let assembled_draw_count = self.prepared_frames[frame_index].assembled_draw_count;
+        if assembled_draw_count == 0 {
             return;
         }
 
@@ -956,12 +1026,12 @@ impl Gpu3DRenderer {
         self.active_texture_id = u32::MAX;
         self.active_tex_image_param = TexImageParam::default();
         self.active_polygon_attr = Gpu3DDrawAttr::default();
-        for i in 0..self.assembled_draw_count {
-            let draw = self.assembled_draws.get_unchecked(i as usize);
+        for i in 0..assembled_draw_count {
+            let draw = self.prepared_frames[frame_index].assembled_draws[i as usize];
             if draw.attr.is_translucent() || draw.tex_image_param.is_translucent() {
                 self.translucent_polygons.push(i);
             } else {
-                self.add_vertices::<false>(i);
+                self.add_vertices::<false>(frame_index, i);
             }
         }
         self.add_indices_batch::<false>();
@@ -970,7 +1040,7 @@ impl Gpu3DRenderer {
         self.active_tex_image_param = TexImageParam::default();
         self.active_polygon_attr = Gpu3DDrawAttr::default();
         for i in 0..self.translucent_polygons.len() {
-            unsafe { self.add_vertices::<true>(*self.translucent_polygons.get_unchecked(i)) };
+            unsafe { self.add_vertices::<true>(frame_index, *self.translucent_polygons.get_unchecked(i)) };
         }
         self.add_indices_batch::<true>();
 
@@ -980,7 +1050,7 @@ impl Gpu3DRenderer {
 
         // println!("render");
 
-        let program = self.gl.program.get_program(self.buffer.swap_buffers.depth_buffering_w());
+        let program = self.gl.program.get_program(frame_swap_buffers.depth_buffering_w());
         gl::UseProgram(program.program);
 
         gl::Enable(gl::DEPTH_TEST);
@@ -992,13 +1062,13 @@ impl Gpu3DRenderer {
 
         let mut toon_table = [0f32; 32 * 3];
         for i in 0..32 {
-            let [r, g, b] = rgb5_to_float8(self.inners[0].toon_table[i]);
+            let [r, g, b] = rgb5_to_float8(self.prepared_frames[frame_index].inner.toon_table[i]);
             toon_table[i * 3] = r;
             toon_table[i * 3 + 1] = g;
             toon_table[i * 3 + 2] = b;
         }
         gl::Uniform3fv(program.toon_table, 32, toon_table.as_ptr());
-        gl::Uniform1f(program.toon_highlight, u8::from(self.inners[0].disp_cnt.polygon_attr_shading()) as f32);
+        gl::Uniform1f(program.toon_highlight, u8::from(self.prepared_frames[frame_index].inner.disp_cnt.polygon_attr_shading()) as f32);
 
         gl::BindBuffer(gl::ARRAY_BUFFER, self.gl.vertices_buf);
         #[cfg(not(target_os = "vita"))]
