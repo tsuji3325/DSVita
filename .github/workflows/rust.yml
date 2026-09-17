@@ -28,7 +28,7 @@ jobs:
           submodules: recursive
 
       - name: Apply Japanese UI
-        if: github.ref_name == 'japanese-ui'
+        if: github.ref_name == 'japanese-ui' || github.ref_name == 'stability-dev'
         run: python3 tools/apply_japanese_ui.py
 
       - name: Install clang 21
