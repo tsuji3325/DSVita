@@ -2,7 +2,7 @@ use crate::core::graphics::gl_utils::GpuFbo;
 use crate::core::graphics::gpu::{PowCnt1, DISPLAY_HEIGHT, DISPLAY_WIDTH};
 use crate::core::graphics::gpu_3d::registers_3d::{Gpu3DBuffer, Gpu3DRegisters, PolygonAttr, PolygonMode, PrimitiveType, SwapBuffers, TexImageParam, TextureCoordTransMode, TextureFormat, Vertex, Viewport};
 use crate::core::graphics::gpu_3d::registers_3d::{POLYGON_LIMIT, VERTEX_LIMIT};
-use crate::core::graphics::gpu_3d::texture_cache::{Texture3D, Texture3DCache};
+use crate::core::graphics::gpu_3d::texture_cache::Texture3DCache;
 use crate::core::graphics::gpu_mem_buf::{GpuMemBuf, GpuMemRefs};
 use crate::core::graphics::gpu_renderer::GpuRendererCommon;
 use crate::core::graphics::gpu_shaders::{Gpu3DShaderDepthPrograms, Gpu3DShaderPrograms, GpuShadersPrograms};
@@ -273,7 +273,9 @@ pub struct Gpu3DDraw {
     pub tex_image_param: TexImageParam,
     pub pal_addr: u16,
     viewport: Viewport,
-    texture_3d_ptr: *mut Texture3D,
+    // Resolved on the GL/render thread after the worker publishes this frame.
+    // Keeping only a GLuint here makes a published frame independent from texture-cache addresses.
+    texture_id: GLuint,
 }
 
 impl Gpu3DDraw {
@@ -607,7 +609,7 @@ impl Gpu3DRenderer {
                 tex_image_param,
                 pal_addr,
                 viewport,
-                texture_3d_ptr: ptr::null_mut(),
+                texture_id: u32::MAX,
             };
 
             frame.assembled_draw_count += 1;
@@ -721,7 +723,8 @@ impl Gpu3DRenderer {
         // );
 
         let texture_id = if draw.tex_image_param.format() != TextureFormat::None {
-            draw.texture_3d_ptr.as_mut_unchecked().get_texture_id()
+            debug_assert_ne!(draw.texture_id, u32::MAX);
+            draw.texture_id
         } else {
             u32::MAX
         };
@@ -797,21 +800,21 @@ impl Gpu3DRenderer {
         self.texture_cache.mark_dirty(mem_buf, mem_refs);
 
         let mut last_value = u64::MAX;
-        let mut last_texture_3d_ptr = ptr::null_mut();
         let frame = &mut self.prepared_frames[frame_index];
         for i in 0..frame.assembled_draw_count {
             let draw = frame.assembled_draws.get_unchecked_mut(i as usize);
+            draw.texture_id = u32::MAX;
             if unlikely(draw.tex_image_param.format() == TextureFormat::None) {
                 continue;
             }
 
             let key = draw.key();
             if key != last_value {
-                let texture_3d = self.texture_cache.get(draw, mem_buf, mem_refs, &mut self.texture_ids_to_delete);
+                // Decode/cache work stays on the 3D worker. OpenGL object creation is deliberately
+                // deferred to the render thread so published frames never retain a cache pointer.
+                let _ = self.texture_cache.get(draw, mem_buf, mem_refs, &mut self.texture_ids_to_delete);
                 last_value = key;
-                last_texture_3d_ptr = texture_3d as _;
             }
-            draw.texture_3d_ptr = last_texture_3d_ptr;
         }
         self.texture_cache.reset_usage();
         mem_buf.vram_banks.dirty_sections.clear();
@@ -980,6 +983,31 @@ impl Gpu3DRenderer {
         }
     }
 
+    /// Convert frame-local texture keys into stable GL object ids on the render thread.
+    ///
+    /// The 3D worker is blocked while this runs under the current handoff protocol. Once ids are
+    /// copied into Prepared3DFrame, later cache replacement can no longer invalidate the frame by
+    /// moving/freeing a cache allocation. GL deletions stay deferred until a later render pass.
+    unsafe fn resolve_prepared_texture_ids(&mut self, frame_index: usize) {
+        let draw_count = self.prepared_frames[frame_index].assembled_draw_count;
+        for i in 0..draw_count {
+            let (format, key) = {
+                let draw = self.prepared_frames[frame_index].assembled_draws.get_unchecked(i as usize);
+                (draw.tex_image_param.format(), draw.key())
+            };
+            if format == TextureFormat::None {
+                continue;
+            }
+
+            let texture_id = self
+                .texture_cache
+                .resolve_texture_id(key)
+                .unwrap_or(u32::MAX);
+            debug_assert_ne!(texture_id, u32::MAX);
+            self.prepared_frames[frame_index].assembled_draws.get_unchecked_mut(i as usize).texture_id = texture_id;
+        }
+    }
+
     pub unsafe fn render(&mut self, common: &GpuRendererCommon, upscale_factor_index: u8, widescreen: WidescreenOption, widescreen_coefficient: f32) {
         let frame_index = self.render_frame_index;
         let frame_pow_cnt1 = self.prepared_frames[frame_index].pow_cnt1;
@@ -992,6 +1020,8 @@ impl Gpu3DRenderer {
             gl::DeleteTextures(self.texture_ids_to_delete.len() as _, self.texture_ids_to_delete.as_ptr());
             self.texture_ids_to_delete.clear();
         }
+
+        self.resolve_prepared_texture_ids(frame_index);
 
         let fbo = self.get_fbo(frame_pow_cnt1.display_swap(), upscale_factor_index, widescreen, widescreen_coefficient);
         gl::BindFramebuffer(gl::FRAMEBUFFER, fbo.fbo());

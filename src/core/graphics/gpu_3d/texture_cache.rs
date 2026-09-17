@@ -785,6 +785,13 @@ impl Texture3DCache {
         unsafe { self.cache.get_mut(&key).unwrap_unchecked().as_mut() }
     }
 
+    /// Resolve a cached texture to its GL id. This must run on the render/GL thread.
+    ///
+    /// Prepared frames store only the resulting GLuint, never a pointer into the cache map.
+    pub unsafe fn resolve_texture_id(&mut self, key: u64) -> Option<GLuint> {
+        self.cache.get_mut(&key).map(|texture_3d| texture_3d.get_texture_id())
+    }
+
     pub fn reset_usage(&mut self) {
         for key in self.used_keys.drain(..) {
             if let Some(texture_3d) = self.cache.get_mut(&key) {
