@@ -540,7 +540,10 @@ pub fn actual_main() {
         let process_3d_thread = thread::Builder::new()
             .name("process_3d_thread".to_owned())
             .spawn(move || {
-                set_thread_prio_affinity(ThreadPriority::Default, &[ThreadAffinity::Core1]);
+                // 3D preprocessing is on the critical path: render_loop waits for this worker
+                // before issuing the 3D draw. Keep its dedicated Core1 affinity, but run it at
+                // high priority so audio/background work cannot stretch a frame by preempting it.
+                set_thread_prio_affinity(ThreadPriority::High, &[ThreadAffinity::Core1]);
                 let emu = unsafe { (emu_ptr as *mut Emu).as_mut_unchecked() };
                 let cpu_active = cpu_active_clone;
                 while cpu_active.load(Ordering::Relaxed) {

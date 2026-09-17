@@ -623,6 +623,9 @@ pub struct Texture3DCache {
     // This turns the common per-frame path from scanning the whole texture cache into
     // checking only textures that overlap sections the guest actually wrote.
     section_keys: Vec<Vec<u64>>,
+    // Only keys touched in the current frame need their in_use flag cleared. Keeping this
+    // list avoids another full-cache walk at the end of every 3D frame.
+    used_keys: Vec<u64>,
     last_tex_rear_plane_img_banks: [u8; 4],
     last_tex_palette_banks: [u8; 6],
     total_size: u32,
@@ -633,6 +636,7 @@ impl Texture3DCache {
         Texture3DCache {
             cache: HashMap::default(),
             section_keys: (0..DIRTY_SECTION_SLOTS).map(|_| Vec::new()).collect(),
+            used_keys: Vec::new(),
             last_tex_rear_plane_img_banks: [u8::MAX; 4],
             last_tex_palette_banks: [u8::MAX; 6],
             total_size: 0,
@@ -649,6 +653,7 @@ impl Texture3DCache {
         }
         self.cache.clear();
         self.total_size = 0;
+        self.used_keys.clear();
         for keys in &mut self.section_keys {
             keys.clear();
         }
@@ -735,7 +740,10 @@ impl Texture3DCache {
         if let Some(texture_3d) = self.cache.get_mut(&key) {
             if texture_3d.in_use || !texture_3d.dirty {
                 texture_3d.last_used = Instant::now();
-                texture_3d.in_use = true;
+                if !texture_3d.in_use {
+                    texture_3d.in_use = true;
+                    self.used_keys.push(key);
+                }
                 return unsafe { mem::transmute(texture_3d.as_mut()) };
             } else {
                 let source_sections = texture_3d.source_sections;
@@ -773,12 +781,15 @@ impl Texture3DCache {
         self.total_size += texture_3d.metadata.size();
         self.cache.insert(key, Box::new(texture_3d));
         self.register_sections(key, source_sections);
+        self.used_keys.push(key);
         unsafe { self.cache.get_mut(&key).unwrap_unchecked().as_mut() }
     }
 
     pub fn reset_usage(&mut self) {
-        for texture_3d in self.cache.values_mut() {
-            texture_3d.in_use = false;
+        for key in self.used_keys.drain(..) {
+            if let Some(texture_3d) = self.cache.get_mut(&key) {
+                texture_3d.in_use = false;
+            }
         }
     }
 }
