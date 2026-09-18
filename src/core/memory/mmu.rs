@@ -2,12 +2,13 @@ use crate::core::cp15::TcmState;
 use crate::core::emu::Emu;
 use crate::core::memory::regions;
 use crate::core::memory::regions::{ARM7_BIOS_REGION, ARM9_BIOS_REGION, DTCM_REGION, GBA_ROM_REGION, ITCM_REGION, OAM_OFFSET, OAM_REGION, PALETTES_REGION, STANDARD_PALETTES_OFFSET, V_MEM_ARM7_RANGE};
+use crate::core::memory::vram::Vram;
 use crate::core::CpuType;
 use crate::core::CpuType::{ARM7, ARM9};
 use crate::logging::debug_println;
 use crate::mmap::{MemRegion, VirtualMem};
 use crate::utils::HeapArrayUsize;
-use regions::{ARM7_BIOS_OFFSET, GBA_RAM_OFFSET, GBA_ROM_OFFSET, GBA_ROM_OFFSET2, IO_PORTS_OFFSET, MAIN_OFFSET, MAIN_REGION, SHARED_WRAM_OFFSET, V_MEM_ARM9_RANGE};
+use regions::{ARM7_BIOS_OFFSET, GBA_RAM_OFFSET, GBA_ROM_OFFSET, GBA_ROM_OFFSET2, IO_PORTS_OFFSET, MAIN_OFFSET, MAIN_REGION, SHARED_WRAM_OFFSET, VRAM_OFFSET, V_MEM_ARM9_RANGE};
 use std::cmp::max;
 
 pub const MMU_PAGE_SHIFT: usize = 12;
@@ -15,6 +16,32 @@ pub const MMU_PAGE_SIZE: usize = 1 << MMU_PAGE_SHIFT;
 
 const FAST_MEM_PAGE_SHIFT: usize = 14;
 pub const FAST_MEM_PAGE_SIZE: usize = 1 << FAST_MEM_PAGE_SHIFT;
+
+const VRAM_FASTMEM_PAGES: usize = (OAM_OFFSET as usize - VRAM_OFFSET as usize) / FAST_MEM_PAGE_SIZE;
+
+fn update_vram_fastmem<const CPU: CpuType>(vram: &Vram, vmem: &mut VirtualMem, mapped_offsets: &mut [usize; VRAM_FASTMEM_PAGES]) {
+    let shm = vram.fastmem_shm();
+
+    for (page, old_offset) in mapped_offsets.iter_mut().enumerate() {
+        let addr = VRAM_OFFSET as usize + page * FAST_MEM_PAGE_SIZE;
+        let new_offset = vram.direct_fastmem_offset::<CPU>(addr as u32).unwrap_or(usize::MAX);
+        if new_offset == *old_offset {
+            continue;
+        }
+
+        if *old_offset != usize::MAX {
+            vmem.destroy_map(addr, FAST_MEM_PAGE_SIZE);
+        }
+
+        if new_offset != usize::MAX {
+            // Reads can bypass the VRAM dispatcher. Writes intentionally fault:
+            // Vram::write must still update every overlapping bank and dirty tracking.
+            vmem.create_map(shm, new_offset, addr, FAST_MEM_PAGE_SIZE, true, false, false).unwrap();
+        }
+
+        *old_offset = new_offset;
+    }
+}
 
 fn remove_mmu_write_entry(addr: u32, region: &MemRegion, mmu: &mut [usize], vmem: Option<&mut VirtualMem>) {
     if mmu[(addr >> MMU_PAGE_SHIFT) as usize] == 0 {
@@ -56,6 +83,7 @@ impl MmuArm9 {
             current_itcm_size: 0,
             current_dtcm_addr: 0,
             current_dtcm_size: 0,
+            vram_fastmem_offsets: [usize::MAX; VRAM_FASTMEM_PAGES],
         }
     }
 }
@@ -69,6 +97,7 @@ pub struct MmuArm9 {
     current_itcm_size: u32,
     current_dtcm_addr: u32,
     current_dtcm_size: u32,
+    vram_fastmem_offsets: [usize; VRAM_FASTMEM_PAGES],
 }
 
 impl Emu {
@@ -274,6 +303,7 @@ pub struct MmuArm7 {
     vmem: VirtualMem,
     mmu_read: HeapArrayUsize<{ V_MEM_ARM7_RANGE as usize / MMU_PAGE_SIZE }>,
     mmu_write: HeapArrayUsize<{ V_MEM_ARM7_RANGE as usize / MMU_PAGE_SIZE }>,
+    vram_fastmem_offsets: [usize; VRAM_FASTMEM_PAGES],
 }
 
 impl MmuArm7 {
@@ -284,6 +314,7 @@ impl MmuArm7 {
             vmem,
             mmu_read: HeapArrayUsize::default(),
             mmu_write: HeapArrayUsize::default(),
+            vram_fastmem_offsets: [usize::MAX; VRAM_FASTMEM_PAGES],
         }
     }
 }
@@ -357,6 +388,21 @@ impl Emu {
 }
 
 impl Emu {
+    fn update_vram_fastmem_arm9(&mut self) {
+        let mem = &mut self.mem;
+        update_vram_fastmem::<{ ARM9 }>(&mem.vram, &mut mem.mmu_arm9.vmem_tcm, &mut mem.mmu_arm9.vram_fastmem_offsets);
+    }
+
+    fn update_vram_fastmem_arm7(&mut self) {
+        let mem = &mut self.mem;
+        update_vram_fastmem::<{ ARM7 }>(&mem.vram, &mut mem.mmu_arm7.vmem, &mut mem.mmu_arm7.vram_fastmem_offsets);
+    }
+
+    pub fn mmu_update_vram_fastmem(&mut self) {
+        self.update_vram_fastmem_arm9();
+        self.update_vram_fastmem_arm7();
+    }
+
     #[inline(never)]
     pub fn mmu_update_all<const CPU: CpuType>(&mut self) {
         match CPU {
@@ -365,8 +411,12 @@ impl Emu {
                 self.initialize_tcm_arm9();
                 self.update_tcm_arm9(0, IO_PORTS_OFFSET);
                 self.initialize_tcm_misc_arm9();
+                self.update_vram_fastmem_arm9();
             }
-            ARM7 => self.update_all_arm7(),
+            ARM7 => {
+                self.update_all_arm7();
+                self.update_vram_fastmem_arm7();
+            }
         }
     }
 

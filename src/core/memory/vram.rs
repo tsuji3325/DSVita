@@ -4,14 +4,15 @@ use crate::core::graphics::gpu::DispCapCnt;
 use crate::core::CpuType;
 use crate::core::CpuType::{ARM7, ARM9};
 use crate::logging::debug_println;
+use crate::mmap::Shm;
 use crate::utils;
-use crate::utils::HeapArrayU8;
 use bilge::prelude::*;
 use paste::paste;
 use static_assertions::{const_assert, const_assert_eq};
 use std::cmp::min;
 use std::hint::{assert_unchecked, unreachable_unchecked};
 use std::intrinsics::likely;
+use std::ops::{Deref, DerefMut};
 
 const BANK_SECTION_SHIFT: usize = 12;
 const BANK_SECTION_SIZE: usize = 1 << BANK_SECTION_SHIFT;
@@ -104,6 +105,19 @@ impl<const SIZE: usize, const MAX_OVERLAP: usize> OverlapSection<SIZE, MAX_OVERL
         T::from(ret)
     }
 
+    #[inline]
+    fn direct_offset(&self, index: usize) -> Option<usize> {
+        if self.count != 1 {
+            return None;
+        }
+        let map = self.overlaps[0];
+        if map.is_null() {
+            None
+        } else {
+            Some(map.offset + index)
+        }
+    }
+
     fn read_all(&self, index: u32, buf: &mut [u8; SIZE], vram: &[u8; TOTAL_SIZE]) {
         unsafe { assert_unchecked((self.count as usize) <= MAX_OVERLAP) };
         if likely(self.count == 1) {
@@ -188,6 +202,14 @@ where
         self.sections[section_index].read(section_offset as u32, vram)
     }
 
+    #[inline]
+    fn direct_offset(&self, mut addr: u32) -> Option<usize> {
+        addr %= SIZE as u32;
+        let section_index = addr as usize / CHUNK_SIZE;
+        let section_offset = addr as usize % CHUNK_SIZE;
+        self.sections[section_index].direct_offset(section_offset)
+    }
+
     fn read_all(&self, mut addr: u32, buf: &mut [u8; SIZE], vram: &[u8; TOTAL_SIZE]) {
         addr %= SIZE as u32;
         for chunk_addr in (addr..addr + SIZE as u32).step_by(CHUNK_SIZE) {
@@ -258,9 +280,53 @@ const BANK_I_SIZE: usize = 16 * 1024;
 pub const TOTAL_SIZE: usize = BANK_A_SIZE + BANK_B_SIZE + BANK_C_SIZE + BANK_D_SIZE + BANK_E_SIZE + BANK_F_SIZE + BANK_G_SIZE + BANK_H_SIZE + BANK_I_SIZE;
 const_assert_eq!(TOTAL_SIZE, 656 * 1024);
 
+/// Shared physical VRAM backing. Using a Shm block lets the ARM JIT's virtual
+/// fastmem area alias unambiguous VRAM windows without copying them.
+pub struct VramMem {
+    shm: Shm,
+}
+
+impl Default for VramMem {
+    fn default() -> Self {
+        let mut shm = Shm::new("vram", TOTAL_SIZE).unwrap();
+        shm.fill(0);
+        VramMem { shm }
+    }
+}
+
+impl VramMem {
+    #[inline]
+    pub fn shm(&self) -> &Shm {
+        &self.shm
+    }
+}
+
+impl Deref for VramMem {
+    type Target = [u8; TOTAL_SIZE];
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*(self.shm.as_ptr() as *const [u8; TOTAL_SIZE]) }
+    }
+}
+
+impl DerefMut for VramMem {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { &mut *(self.shm.as_mut_ptr() as *mut [u8; TOTAL_SIZE]) }
+    }
+}
+
+unsafe impl Send for VramMem {}
+unsafe impl Sync for VramMem {}
+
+impl crate::savestate::Savestate for VramMem {
+    fn savestate(&mut self, state: &mut crate::savestate::SavestateContext) {
+        state.pod_slice(self.deref_mut());
+    }
+}
+
 #[derive(Default)]
 pub struct VramBanks {
-    pub mem: HeapArrayU8<TOTAL_SIZE>,
+    pub mem: VramMem,
     pub dirty_sections: Bitset<6>,
 }
 
@@ -816,6 +882,30 @@ impl Vram {
 }
 
 impl Vram {
+    /// Returns the physical backing offset only when this guest address resolves
+    /// to exactly one VRAM bank. Empty and overlapping windows must stay on the
+    /// slow path because their DS semantics are zero/OR respectively.
+    #[inline]
+    pub fn direct_fastmem_offset<const CPU: CpuType>(&self, addr: u32) -> Option<usize> {
+        let base_addr = addr & 0xF00000;
+        let addr_offset = addr & 0xFFFFF;
+        match CPU {
+            ARM9 => match base_addr {
+                BG_A_OFFSET => self.maps.bg_a.direct_offset(addr_offset),
+                OBJ_A_OFFSET => self.maps.obj_a.direct_offset(addr_offset),
+                BG_B_OFFSET => self.maps.bg_b.direct_offset(addr_offset),
+                OBJ_B_OFFSET => self.maps.obj_b.direct_offset(addr_offset),
+                _ => self.maps.lcdc.direct_offset(addr_offset),
+            },
+            ARM7 => self.arm7.direct_offset(addr_offset),
+        }
+    }
+
+    #[inline]
+    pub fn fastmem_shm(&self) -> &Shm {
+        self.banks.mem.shm()
+    }
+
     pub fn read<const CPU: CpuType, T: utils::Convert>(&self, addr: u32) -> T {
         let base_addr = addr & 0xF00000;
         let addr_offset = addr & 0xFFFFF;
@@ -898,5 +988,6 @@ impl Emu {
         self.mem.vram.rebuild_maps();
 
         self.jit.invalidate_vram();
+        self.mmu_update_vram_fastmem();
     }
 }
