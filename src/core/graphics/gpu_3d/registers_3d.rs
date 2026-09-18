@@ -701,13 +701,22 @@ macro_rules! unpacked_cmd {
 }
 
 impl Emu {
+    #[inline(always)]
     pub fn regs_3d_run_cmds(&mut self, total_cycles: u32) {
+        // execute_jit calls this on every scheduler slice. Keep the overwhelmingly cheap
+        // no-work case inline so an empty geometry FIFO doesn't pay a large function-call
+        // round trip into the ARM dispatch body.
         let regs_3d = &mut self.gpu.gpu_3d_regs;
-        if unlikely(regs_3d.cmd_fifo.is_empty() || regs_3d.flags.flushed()) {
+        if regs_3d.cmd_fifo.is_empty() || unlikely(regs_3d.flags.flushed()) {
             regs_3d.last_total_cycles = total_cycles;
             return;
         }
+        self.regs_3d_run_cmds_nonempty(total_cycles);
+    }
 
+    #[inline(never)]
+    fn regs_3d_run_cmds_nonempty(&mut self, total_cycles: u32) {
+        let regs_3d = &mut self.gpu.gpu_3d_regs;
         let is_cmd_fifo_half_full = regs_3d.is_cmd_fifo_half_full();
 
         let mut cycle_diff = (total_cycles - regs_3d.last_total_cycles).saturating_sub(1);
