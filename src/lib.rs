@@ -259,16 +259,25 @@ fn fault_handler(mem_addr: usize, host_pc: &mut usize, arm_context: &ArmContext)
 
 #[inline(never)]
 fn execute_jit<const ARM7_HLE: bool>(jit_asm_arm9: &mut JitAsm, jit_asm_arm7: &mut JitAsm) {
+    // In HLE mode only ARM9 executes guest JIT code, so the fault-handler CPU selector is
+    // invariant. Avoid rewriting this global on every scheduler slice.
+    if ARM7_HLE {
+        unsafe { CURRENT_RUNNING_CPU = ARM9 };
+    }
+
     loop {
-        let arm9_cycles = if !jit_asm_arm9.emu.cpu_is_halted(ARM9) {
-            unsafe { CURRENT_RUNNING_CPU = ARM9 };
+        let arm9_halted = jit_asm_arm9.emu.cpu_is_halted(ARM9);
+        let arm9_cycles = if !arm9_halted {
+            if !ARM7_HLE {
+                unsafe { CURRENT_RUNNING_CPU = ARM9 };
+            }
             (jit_asm_arm9.execute::<{ ARM9 }>() + 1) >> 1
         } else {
             0
         };
 
         if ARM7_HLE {
-            if unlikely(jit_asm_arm9.emu.cpu_is_halted(ARM9)) {
+            if unlikely(arm9_halted) {
                 jit_asm_arm9.emu.cm.jump_to_next_event();
             } else {
                 jit_asm_arm9.emu.cm.add_cycles(arm9_cycles);
