@@ -274,9 +274,6 @@ pub struct Gpu3DDraw {
     pub tex_image_param: TexImageParam,
     pub pal_addr: u16,
     viewport: Viewport,
-    // Resolved on the GL/render thread after the worker publishes this frame.
-    // Keeping only a GLuint here makes a published frame independent from texture-cache addresses.
-    texture_id: GLuint,
 }
 
 impl Gpu3DDraw {
@@ -612,7 +609,6 @@ impl Gpu3DRenderer {
                 tex_image_param,
                 pal_addr,
                 viewport,
-                texture_id: u32::MAX,
             };
 
             frame.assembled_draw_count += 1;
@@ -871,23 +867,23 @@ impl Gpu3DRenderer {
     pub unsafe fn populate_tex_cache(&mut self, frame_index: usize, mem_buf: &mut GpuMemBuf, mem_refs: &GpuMemRefs) {
         self.texture_cache.mark_dirty(mem_buf, mem_refs);
 
-        let mut last_value = u64::MAX;
-        let frame = &mut self.prepared_frames[frame_index];
-        for i in 0..frame.assembled_draw_count {
-            let draw = frame.assembled_draws.get_unchecked_mut(i as usize);
-            draw.texture_id = u32::MAX;
-            if unlikely(draw.tex_image_param.format() == TextureFormat::None) {
+        // Geometry preparation already collapses polygons into draw batches. Use those batches as
+        // the texture working set instead of walking every assembled polygon again.
+        let frame = &self.prepared_frames[frame_index];
+        let mut last_key = u64::MAX;
+        for batch in frame
+            .indices_opaque_batches
+            .iter()
+            .chain(frame.indices_translucent_batches.iter())
+        {
+            let key = batch.tex_key;
+            if key == u64::MAX || key == last_key {
                 continue;
             }
-
-            let key = draw.key();
-            if key != last_value {
-                // Decode/cache work stays on the 3D worker. OpenGL object creation is deliberately
-                // deferred to the render thread so published frames never retain a cache pointer.
-                let _ = self.texture_cache.get(draw, mem_buf, mem_refs, &mut self.texture_ids_to_delete);
-                last_value = key;
-            }
+            let _ = self.texture_cache.get(key, mem_buf, mem_refs, &mut self.texture_ids_to_delete);
+            last_key = key;
         }
+
         self.texture_cache.reset_usage();
         mem_buf.vram_banks.dirty_sections.clear();
     }
