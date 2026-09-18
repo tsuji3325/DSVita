@@ -333,7 +333,7 @@ impl GpuRenderer {
         self.common.pow_cnt1[0] = PowCnt1::from(0);
         *self.processed_3d.lock().unwrap() = false;
         *self.rendering.lock().unwrap() = false;
-        self.renderer_vram_busy.store(false, Ordering::SeqCst);
+        self.renderer_vram_busy.store(false, Ordering::Release);
         self.sample_2d = true;
         self.ready_2d = false;
         self.rendering_3d = false;
@@ -396,7 +396,7 @@ impl GpuRenderer {
             self.ready_2d = false;
             self.sample_2d = false;
             self.renderer_3d.on_render_start();
-            self.renderer_vram_busy.store(true, Ordering::SeqCst);
+            self.renderer_vram_busy.store(true, Ordering::Release);
             *rendering = true;
             self.rendering_condvar.notify_all();
         }
@@ -407,14 +407,17 @@ impl GpuRenderer {
     }
 
     pub fn reload_registers(&mut self, vram: &Vram) {
+        // This is called on the scanline path. Read the cross-thread busy flag once instead of
+        // doing two sequentially-consistent atomics for the same decision.
+        let renderer_vram_busy = self.renderer_vram_busy.load(Ordering::Acquire);
         trace_2d(if self.ready_2d {
             Trace2D::ReloadSkipReady
-        } else if self.renderer_vram_busy.load(Ordering::SeqCst) {
+        } else if renderer_vram_busy {
             Trace2D::ReloadSkipBusy
         } else {
             Trace2D::ReloadArmed
         });
-        if !self.ready_2d && !self.renderer_vram_busy.load(Ordering::SeqCst) {
+        if !self.ready_2d && !renderer_vram_busy {
             self.common.mem_buf.queue_vram(vram);
             self.renderer_regs_2d_shared.reload_registers();
             self.sample_2d = true;
@@ -711,7 +714,7 @@ impl GpuRenderer {
                 // todo!()
             }
 
-            self.renderer_vram_busy.store(false, Ordering::SeqCst);
+            self.renderer_vram_busy.store(false, Ordering::Release);
 
             gl::BindFramebuffer(gl::FRAMEBUFFER, self.final_fbo.fbo);
             gl::Viewport(0, 0, PRESENTER_SCREEN_WIDTH as _, PRESENTER_SCREEN_HEIGHT as _);
