@@ -1231,7 +1231,7 @@ impl Gpu3DRenderer {
                 set_stencil_func((gl::EQUAL, 0x80, 0x80), &mut stencil_func);
                 set_stencil_op((gl::KEEP, gl::KEEP, gl::KEEP), &mut stencil_op);
 
-                gl::DrawElements(gl::TRIANGLES, count as _, gl::UNSIGNED_SHORT, ptr as _);
+                gl::DrawElements(gl::TRIANGLES, count as _, gl::UNSIGNED_SHORT, byte_offset as *const _);
 
                 set_stencil_mask(0x80, &mut stencil_mask);
                 gl::Clear(gl::STENCIL_BUFFER_BIT);
