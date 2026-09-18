@@ -718,6 +718,9 @@ pub struct Texture3DCache {
     // Only keys touched in the current frame need their in_use flag cleared. Keeping this
     // list avoids another full-cache walk at the end of every 3D frame.
     used_keys: Vec<u64>,
+    // Reused per-frame scratch to keep mark_dirty off the allocator hot path.
+    dirty_candidates: Vec<u64>,
+    newly_dirty: Vec<(u64, Bitset<6>)>,
     last_tex_rear_plane_img_banks: [u8; 4],
     last_tex_palette_banks: [u8; 6],
     // Monotonic LRU stamp. Querying a wall clock on every texture hit is unnecessary;
@@ -732,6 +735,8 @@ impl Texture3DCache {
             cache: HashMap::default(),
             section_keys: (0..DIRTY_SECTION_SLOTS).map(|_| Vec::new()).collect(),
             used_keys: Vec::new(),
+            dirty_candidates: Vec::new(),
+            newly_dirty: Vec::new(),
             last_tex_rear_plane_img_banks: [u8::MAX; 4],
             last_tex_palette_banks: [u8::MAX; 6],
             use_stamp: 1,
@@ -751,6 +756,8 @@ impl Texture3DCache {
         self.total_size = 0;
         self.use_stamp = 1;
         self.used_keys.clear();
+        self.dirty_candidates.clear();
+        self.newly_dirty.clear();
         for keys in &mut self.section_keys {
             keys.clear();
         }
@@ -791,7 +798,8 @@ impl Texture3DCache {
             return;
         }
 
-        let mut newly_dirty: Vec<(u64, Bitset<6>)> = Vec::new();
+        self.newly_dirty.clear();
+        self.dirty_candidates.clear();
 
         if mappings_changed {
             // VRAMCNT remaps are rare but can invalidate a texture without a data write.
@@ -799,27 +807,27 @@ impl Texture3DCache {
             for (&key, texture_3d) in self.cache.iter_mut() {
                 if !texture_3d.dirty && texture_3d.is_dirty(mem_buf, mem_refs) {
                     texture_3d.dirty = true;
-                    newly_dirty.push((key, texture_3d.source_sections));
+                    self.newly_dirty.push((key, texture_3d.source_sections));
                 }
             }
         } else if !mem_buf.vram_banks.dirty_sections.is_empty() {
             // Common path: collect only textures that reference a physical section dirtied
             // since the previous GPU read. A key can span several dirty sections, so dedupe
             // before doing the more expensive mapping/hash validation.
-            let mut candidates = Vec::new();
             for section in 0..DIRTY_SECTION_SLOTS {
                 if mem_buf.vram_banks.dirty_sections.contains(section) {
-                    candidates.extend_from_slice(&self.section_keys[section]);
+                    self.dirty_candidates.extend_from_slice(&self.section_keys[section]);
                 }
             }
-            candidates.sort_unstable();
-            candidates.dedup();
+            self.dirty_candidates.sort_unstable();
+            self.dirty_candidates.dedup();
 
-            for key in candidates {
+            for candidate_index in 0..self.dirty_candidates.len() {
+                let key = self.dirty_candidates[candidate_index];
                 if let Some(texture_3d) = self.cache.get_mut(&key) {
                     if !texture_3d.dirty && texture_3d.is_dirty(mem_buf, mem_refs) {
                         texture_3d.dirty = true;
-                        newly_dirty.push((key, texture_3d.source_sections));
+                        self.newly_dirty.push((key, texture_3d.source_sections));
                     }
                 }
             }
@@ -827,7 +835,7 @@ impl Texture3DCache {
 
         // Dirty entries no longer need to participate in subsequent frame candidate scans;
         // they are replaced lazily the next time the game actually draws them.
-        for (key, sections) in newly_dirty {
+        while let Some((key, sections)) = self.newly_dirty.pop() {
             self.unregister_sections(key, sections);
         }
     }
