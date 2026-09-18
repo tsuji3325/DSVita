@@ -267,6 +267,18 @@ impl Emu {
                 _ => {}
             }
         }
+
+        // These are plain read-only mirrors. Mapping them into the fastmem reservation means
+        // JIT loads stay direct LDR/LDRH/LDRB instead of taking an abort and permanently
+        // patching the instruction to a slow handler on first use.
+        self.mem.mmu_arm9.vmem_tcm.destroy_region_map(&GBA_ROM_REGION);
+        self.mem.mmu_arm9.vmem_tcm.create_region_map(&self.mem.shm, &GBA_ROM_REGION).unwrap();
+
+        self.mem.mmu_arm9.vmem_tcm.destroy_region_map(&GBA_RAM_REGION);
+        self.mem.mmu_arm9.vmem_tcm.create_region_map(&self.mem.shm, &GBA_RAM_REGION).unwrap();
+
+        self.mem.mmu_arm9.vmem_tcm.destroy_region_map(&ARM9_BIOS_REGION);
+        self.mem.mmu_arm9.vmem_tcm.create_region_map(&self.mem.shm, &ARM9_BIOS_REGION).unwrap();
     }
 }
 
@@ -308,8 +320,8 @@ impl Emu {
             }
         }
 
-        // self.mem.mmu_arm7.vmem.destroy_region_map(&ARM7_BIOS_REGION);
-        // self.mem.mmu_arm7.vmem.create_region_map(&self.mem.shm, &ARM7_BIOS_REGION).unwrap();
+        self.mem.mmu_arm7.vmem.destroy_region_map(&ARM7_BIOS_REGION);
+        self.mem.mmu_arm7.vmem.create_region_map(&self.mem.shm, &ARM7_BIOS_REGION).unwrap();
 
         for addr in (MAIN_OFFSET..SHARED_WRAM_OFFSET).step_by(FAST_MEM_PAGE_SIZE) {
             self.mem.mmu_arm7.vmem.set_protection(addr as usize, FAST_MEM_PAGE_SIZE, false, false, false);
@@ -324,11 +336,11 @@ impl Emu {
                 .unwrap();
         }
 
-        // self.mem.mmu_arm7.vmem.destroy_region_map(&GBA_ROM_REGION);
-        // self.mem.mmu_arm7.vmem.create_region_map(&self.mem.shm, &GBA_ROM_REGION).unwrap();
-        //
-        // self.mem.mmu_arm7.vmem.destroy_region_map(&GBA_RAM_REGION);
-        // self.mem.mmu_arm7.vmem.create_region_map(&self.mem.shm, &GBA_RAM_REGION).unwrap();
+        self.mem.mmu_arm7.vmem.destroy_region_map(&GBA_ROM_REGION);
+        self.mem.mmu_arm7.vmem.create_region_map(&self.mem.shm, &GBA_ROM_REGION).unwrap();
+
+        self.mem.mmu_arm7.vmem.destroy_region_map(&GBA_RAM_REGION);
+        self.mem.mmu_arm7.vmem.create_region_map(&self.mem.shm, &GBA_RAM_REGION).unwrap();
 
         self.update_wram_arm7();
     }
