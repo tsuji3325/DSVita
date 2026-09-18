@@ -18,11 +18,12 @@ use static_assertions::const_assert_eq;
 use std::arch::aarch64::{vcvt_n_f32_s32, vcvtq_n_f32_s32, vget_low_s32, vsetq_lane_s32, vshr_n_s32, vst1_f32, vst1q_f32};
 #[cfg(target_arch = "arm")]
 use std::arch::arm::{vcvt_n_f32_s32, vcvtq_n_f32_s32, vget_low_s32, vsetq_lane_s32, vshr_n_s32, vst1_f32, vst1q_f32};
-use std::hint::{assert_unchecked, unreachable_unchecked};
+use std::hint::{assert_unchecked, spin_loop, unreachable_unchecked};
 use std::intrinsics::unlikely;
 use std::mem::{self, MaybeUninit};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Condvar, Mutex};
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
@@ -379,6 +380,10 @@ pub struct Gpu3DRenderer {
     indices_opaque_batches: Vec<IndicesBatch>,
     indices_translucent_batches: Vec<IndicesBatch>,
     vram_ready: AtomicBool,
+    // Core1 previously busy-spun at 100% while waiting for the render thread to finish
+    // reading VRAM. Keep a very short spin for sub-microsecond handoffs, then sleep.
+    vram_ready_mutex: Mutex<()>,
+    vram_ready_condvar: Condvar,
 
     mem: Gpu3DTexMem,
 }
@@ -422,6 +427,8 @@ impl Gpu3DRenderer {
             indices_opaque_batches: Vec::new(),
             indices_translucent_batches: Vec::new(),
             vram_ready: AtomicBool::new(false),
+            vram_ready_mutex: Mutex::new(()),
+            vram_ready_condvar: Condvar::new(),
 
             mem: Default::default(),
         }
@@ -940,15 +947,39 @@ impl Gpu3DRenderer {
         // in parallel with the previous frame's GL rendering.
         self.prepare_render_geometry(frame_index);
 
-        while !self.vram_ready.load(Ordering::SeqCst) {}
+        self.wait_for_vram_ready();
         self.populate_tex_cache(frame_index, &mut common.mem_buf, mem_refs);
 
         self.render_frame_index = frame_index;
         self.prepare_frame_index ^= 1;
     }
 
+    #[inline]
+    fn wait_for_vram_ready(&self) {
+        // Most frames reach the handoff quickly. A tiny spin avoids a kernel sleep/wake when the
+        // render thread is only a few instructions behind, but unlike the old unbounded spin it
+        // cannot pin Core1 at ~100% while waiting on VRAM copies or 2D work.
+        const SPIN_ITERS: usize = 128;
+        for _ in 0..SPIN_ITERS {
+            if self.vram_ready.load(Ordering::Acquire) {
+                return;
+            }
+            spin_loop();
+        }
+
+        if self.vram_ready.load(Ordering::Acquire) {
+            return;
+        }
+
+        let guard = self.vram_ready_mutex.lock().unwrap();
+        let _guard = self
+            .vram_ready_condvar
+            .wait_while(guard, |_| !self.vram_ready.load(Ordering::Acquire))
+            .unwrap();
+    }
+
     pub fn on_render_start(&self) {
-        self.vram_ready.store(false, Ordering::SeqCst);
+        self.vram_ready.store(false, Ordering::Release);
     }
 
     pub fn set_tex_ptrs(&mut self, refs: &mut GpuMemRefs) {
@@ -959,7 +990,8 @@ impl Gpu3DRenderer {
     }
 
     pub fn on_vram_ready(&self) {
-        self.vram_ready.store(true, Ordering::SeqCst);
+        self.vram_ready.store(true, Ordering::Release);
+        self.vram_ready_condvar.notify_one();
     }
 
     pub fn get_fbo(&mut self, swap: bool, upscale_factor_index: u8, widescreen: WidescreenOption, widescreen_coefficient: f32) -> &Gpu3DFbo {
