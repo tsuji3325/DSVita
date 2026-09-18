@@ -972,108 +972,177 @@ impl Gpu3DRenderer {
 
     unsafe fn draw_elements(translucent_only: bool, program: &Gpu3DShaderPrograms, indices: &[u16], indices_batch: &[IndicesBatch]) {
         let mut previous_offset = 0;
-        for batch in indices_batch {
-            // println!("draw elements {translucent_only} {previous_offset} {} {:?}", batch.indices_offset - previous_offset, batch.attr.id());
 
+        // VitaGL state changes are not free. Batches are already ordered for DS correctness, so
+        // keep that order but avoid re-emitting states that are identical to the previous batch.
+        let mut bound_texture = u32::MAX;
+        let mut bound_wrap_s = i32::MIN;
+        let mut bound_wrap_t = i32::MIN;
+        let mut uniform_tex_image_param = u32::MAX;
+        let mut uniform_polygon_attr = u32::MAX;
+        let mut depth_mask: Option<bool> = None;
+        let mut color_mask: Option<[bool; 4]> = None;
+        let mut stencil_mask = u32::MAX;
+        let mut stencil_func: Option<(u32, i32, u32)> = None;
+        let mut stencil_op: Option<(u32, u32, u32)> = None;
+        let mut cull_enabled: Option<bool> = None;
+        let mut cull_face = u32::MAX;
+
+        gl::ActiveTexture(gl::TEXTURE0);
+
+        for batch in indices_batch {
             if batch.tex_image_param.format() != TextureFormat::None {
                 debug_assert_ne!(batch.tex, u32::MAX);
-                gl::ActiveTexture(gl::TEXTURE0);
-                gl::BindTexture(gl::TEXTURE_2D, batch.tex);
-                gl::TexParameteri(
-                    gl::TEXTURE_2D,
-                    gl::TEXTURE_WRAP_S,
-                    if batch.tex_image_param.repeat_s() {
-                        if batch.tex_image_param.flip_s() {
-                            gl::MIRRORED_REPEAT
-                        } else {
-                            gl::REPEAT
-                        }
-                    } else {
-                        gl::CLAMP_TO_EDGE
-                    } as _,
-                );
-                gl::TexParameteri(
-                    gl::TEXTURE_2D,
-                    gl::TEXTURE_WRAP_T,
-                    if batch.tex_image_param.repeat_t() {
-                        if batch.tex_image_param.flip_t() {
-                            gl::MIRRORED_REPEAT
-                        } else {
-                            gl::REPEAT
-                        }
-                    } else {
-                        gl::CLAMP_TO_EDGE
-                    } as _,
-                );
-            }
 
-            let tex_image_param = [u32::from(batch.tex_image_param)];
-            gl::Uniform1fv(program.tex_image_param, 1, tex_image_param.as_ptr() as _);
-
-            if translucent_only {
-                if batch.attr.trans_new_depth() {
-                    gl::DepthMask(gl::TRUE);
-                } else {
-                    gl::DepthMask(gl::FALSE);
-                }
-
-                if batch.attr.mode() == PolygonMode::Shadow {
-                    gl::ColorMask(gl::FALSE, gl::FALSE, gl::FALSE, gl::FALSE);
-                    gl::StencilMask(0x80);
-                    if u8::from(batch.attr.id()) == 0 {
-                        gl::StencilFunc(gl::ALWAYS, 0x80, 0x80);
-                        gl::StencilOp(gl::KEEP, gl::REPLACE, gl::KEEP);
+                let wrap_s = if batch.tex_image_param.repeat_s() {
+                    if batch.tex_image_param.flip_s() {
+                        gl::MIRRORED_REPEAT
                     } else {
-                        gl::StencilFunc(gl::NOTEQUAL, u8::from(batch.attr.id()) as _, 0x3F);
-                        gl::StencilOp(gl::ZERO, gl::KEEP, gl::KEEP);
+                        gl::REPEAT
                     }
                 } else {
-                    gl::ColorMask(gl::TRUE, gl::TRUE, gl::TRUE, gl::TRUE);
-                    gl::StencilMask(0x7F);
-                    gl::StencilFunc(gl::NOTEQUAL, (u8::from(batch.attr.id()) | 0x40) as _, 0x7F);
-                    gl::StencilOp(gl::KEEP, gl::KEEP, gl::REPLACE);
-                }
-            } else {
-                gl::ColorMask(gl::TRUE, gl::TRUE, gl::TRUE, gl::TRUE);
-                gl::StencilMask(0x7F);
-                gl::StencilFunc(gl::ALWAYS, u8::from(batch.attr.id()) as _, 0x7F);
-                gl::StencilOp(gl::KEEP, gl::KEEP, gl::REPLACE);
+                    gl::CLAMP_TO_EDGE
+                } as i32;
+                let wrap_t = if batch.tex_image_param.repeat_t() {
+                    if batch.tex_image_param.flip_t() {
+                        gl::MIRRORED_REPEAT
+                    } else {
+                        gl::REPEAT
+                    }
+                } else {
+                    gl::CLAMP_TO_EDGE
+                } as i32;
 
-                gl::Disable(gl::BLEND);
+                if bound_texture != batch.tex {
+                    gl::BindTexture(gl::TEXTURE_2D, batch.tex);
+                    bound_texture = batch.tex;
+                    // Texture parameters belong to the texture object. Conservatively refresh the
+                    // cached values on rebind; consecutive polygons using the same texture skip them.
+                    bound_wrap_s = i32::MIN;
+                    bound_wrap_t = i32::MIN;
+                }
+                if bound_wrap_s != wrap_s {
+                    gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, wrap_s);
+                    bound_wrap_s = wrap_s;
+                }
+                if bound_wrap_t != wrap_t {
+                    gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, wrap_t);
+                    bound_wrap_t = wrap_t;
+                }
             }
 
-            if !batch.attr.render_back() || !batch.attr.render_front() {
-                gl::Enable(gl::CULL_FACE);
-                gl::CullFace(match (batch.attr.render_back(), batch.attr.render_front()) {
+            let tex_param = u32::from(batch.tex_image_param);
+            if uniform_tex_image_param != tex_param {
+                gl::Uniform1fv(program.tex_image_param, 1, (&tex_param as *const u32).cast());
+                uniform_tex_image_param = tex_param;
+            }
+
+            let set_depth_mask = |value: bool, cached: &mut Option<bool>| {
+                if *cached != Some(value) {
+                    gl::DepthMask(if value { gl::TRUE } else { gl::FALSE });
+                    *cached = Some(value);
+                }
+            };
+            let set_color_mask = |value: [bool; 4], cached: &mut Option<[bool; 4]>| {
+                if *cached != Some(value) {
+                    gl::ColorMask(
+                        if value[0] { gl::TRUE } else { gl::FALSE },
+                        if value[1] { gl::TRUE } else { gl::FALSE },
+                        if value[2] { gl::TRUE } else { gl::FALSE },
+                        if value[3] { gl::TRUE } else { gl::FALSE },
+                    );
+                    *cached = Some(value);
+                }
+            };
+            let set_stencil_mask = |value: u32, cached: &mut u32| {
+                if *cached != value {
+                    gl::StencilMask(value);
+                    *cached = value;
+                }
+            };
+            let set_stencil_func = |value: (u32, i32, u32), cached: &mut Option<(u32, i32, u32)>| {
+                if *cached != Some(value) {
+                    gl::StencilFunc(value.0, value.1, value.2);
+                    *cached = Some(value);
+                }
+            };
+            let set_stencil_op = |value: (u32, u32, u32), cached: &mut Option<(u32, u32, u32)>| {
+                if *cached != Some(value) {
+                    gl::StencilOp(value.0, value.1, value.2);
+                    *cached = Some(value);
+                }
+            };
+
+            if translucent_only {
+                set_depth_mask(batch.attr.trans_new_depth(), &mut depth_mask);
+
+                if batch.attr.mode() == PolygonMode::Shadow {
+                    set_color_mask([false; 4], &mut color_mask);
+                    set_stencil_mask(0x80, &mut stencil_mask);
+                    if u8::from(batch.attr.id()) == 0 {
+                        set_stencil_func((gl::ALWAYS, 0x80, 0x80), &mut stencil_func);
+                        set_stencil_op((gl::KEEP, gl::REPLACE, gl::KEEP), &mut stencil_op);
+                    } else {
+                        set_stencil_func((gl::NOTEQUAL, u8::from(batch.attr.id()) as i32, 0x3F), &mut stencil_func);
+                        set_stencil_op((gl::ZERO, gl::KEEP, gl::KEEP), &mut stencil_op);
+                    }
+                } else {
+                    set_color_mask([true; 4], &mut color_mask);
+                    set_stencil_mask(0x7F, &mut stencil_mask);
+                    set_stencil_func((gl::NOTEQUAL, (u8::from(batch.attr.id()) | 0x40) as i32, 0x7F), &mut stencil_func);
+                    set_stencil_op((gl::KEEP, gl::KEEP, gl::REPLACE), &mut stencil_op);
+                }
+            } else {
+                set_color_mask([true; 4], &mut color_mask);
+                set_stencil_mask(0x7F, &mut stencil_mask);
+                set_stencil_func((gl::ALWAYS, u8::from(batch.attr.id()) as i32, 0x7F), &mut stencil_func);
+                set_stencil_op((gl::KEEP, gl::KEEP, gl::REPLACE), &mut stencil_op);
+            }
+
+            let needs_cull = !batch.attr.render_back() || !batch.attr.render_front();
+            if cull_enabled != Some(needs_cull) {
+                if needs_cull {
+                    gl::Enable(gl::CULL_FACE);
+                } else {
+                    gl::Disable(gl::CULL_FACE);
+                }
+                cull_enabled = Some(needs_cull);
+            }
+            if needs_cull {
+                let face = match (batch.attr.render_back(), batch.attr.render_front()) {
                     (false, false) => gl::FRONT_AND_BACK,
                     (true, false) => gl::FRONT,
                     (false, true) => gl::BACK,
                     _ => unreachable_unchecked(),
-                })
-            } else {
-                gl::Disable(gl::CULL_FACE);
+                };
+                if cull_face != face {
+                    gl::CullFace(face);
+                    cull_face = face;
+                }
             }
 
-            let attr = [u32::from(batch.attr)];
-            gl::Uniform1fv(program.polygon_attrs, 1, attr.as_ptr() as _);
+            let attr = u32::from(batch.attr);
+            if uniform_polygon_attr != attr {
+                gl::Uniform1fv(program.polygon_attrs, 1, (&attr as *const u32).cast());
+                uniform_polygon_attr = attr;
+            }
 
             let count = batch.indices_offset - previous_offset;
             let ptr = indices.as_ptr().add(previous_offset);
             gl::DrawElements(gl::TRIANGLES, count as _, gl::UNSIGNED_SHORT, ptr as _);
 
             if translucent_only && batch.attr.mode() == PolygonMode::Shadow && u8::from(batch.attr.id()) != 0 {
-                gl::ColorMask(gl::TRUE, gl::TRUE, gl::TRUE, gl::TRUE);
-
-                gl::StencilFunc(gl::EQUAL, 0x80, 0x80);
-                gl::StencilOp(gl::KEEP, gl::KEEP, gl::KEEP);
+                set_color_mask([true; 4], &mut color_mask);
+                set_stencil_func((gl::EQUAL, 0x80, 0x80), &mut stencil_func);
+                set_stencil_op((gl::KEEP, gl::KEEP, gl::KEEP), &mut stencil_op);
 
                 gl::DrawElements(gl::TRIANGLES, count as _, gl::UNSIGNED_SHORT, ptr as _);
 
-                gl::StencilMask(0x80);
+                set_stencil_mask(0x80, &mut stencil_mask);
                 gl::Clear(gl::STENCIL_BUFFER_BIT);
             }
 
-            previous_offset = batch.indices_offset
+            previous_offset = batch.indices_offset;
         }
     }
 
@@ -1086,22 +1155,33 @@ impl Gpu3DRenderer {
         let texture_cache = &mut self.texture_cache;
         let frame = &mut self.prepared_frames[frame_index];
 
+        let mut last_key = u64::MAX;
+        let mut last_texture_id = u32::MAX;
         for batch in &mut frame.indices_opaque_batches {
             batch.tex = if batch.tex_image_param.format() == TextureFormat::None {
                 u32::MAX
             } else {
-                texture_cache.resolve_texture_id(batch.tex_key).unwrap_or(u32::MAX)
+                if batch.tex_key != last_key {
+                    last_key = batch.tex_key;
+                    last_texture_id = texture_cache.resolve_texture_id(batch.tex_key).unwrap_or(u32::MAX);
+                }
+                last_texture_id
             };
             if batch.tex_image_param.format() != TextureFormat::None {
                 debug_assert_ne!(batch.tex, u32::MAX);
             }
         }
 
+        // Keep the memo across opaque -> translucent; many games reuse the same atlas.
         for batch in &mut frame.indices_translucent_batches {
             batch.tex = if batch.tex_image_param.format() == TextureFormat::None {
                 u32::MAX
             } else {
-                texture_cache.resolve_texture_id(batch.tex_key).unwrap_or(u32::MAX)
+                if batch.tex_key != last_key {
+                    last_key = batch.tex_key;
+                    last_texture_id = texture_cache.resolve_texture_id(batch.tex_key).unwrap_or(u32::MAX);
+                }
+                last_texture_id
             };
             if batch.tex_image_param.format() != TextureFormat::None {
                 debug_assert_ne!(batch.tex, u32::MAX);
@@ -1206,6 +1286,7 @@ impl Gpu3DRenderer {
         let frame = &self.prepared_frames[frame_index];
         if !frame.indices_opaque.is_empty() {
             gl::DepthMask(gl::TRUE);
+            gl::Disable(gl::BLEND);
             Self::draw_elements(false, program, &frame.indices_opaque, &frame.indices_opaque_batches);
         }
 
