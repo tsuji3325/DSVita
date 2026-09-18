@@ -244,6 +244,16 @@ unsafe fn process_fault<const CPU: CpuType>(mem_addr: usize, host_pc: &mut usize
 
     let guest_mem_addr = (mem_addr - CPU.mmu_tcm_addr()) as u32;
     debug_println!("{CPU:?} guest fault at {mem_addr:x} to guest {guest_mem_addr:x}");
+
+    // A write-protected RAM page is not genuinely slow memory. If the store merely hit JIT
+    // write tracking, invalidate the touched guest code, restore the page when safe, and retry
+    // the original fast store instead of converting this site into a permanent handler call.
+    if let Some(size) = asm.emu.jit.faulting_single_write_size(*host_pc) {
+        if asm.emu.jit_try_retry_protected_write::<CPU>(guest_mem_addr, size) {
+            return true;
+        }
+    }
+
     asm.emu.jit.patch_slow_mem(host_pc, guest_mem_addr, CPU, arm_context)
 }
 

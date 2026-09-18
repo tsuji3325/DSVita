@@ -30,6 +30,19 @@ fn remove_mmu_write_entry(addr: u32, region: &MemRegion, mmu: &mut [usize], vmem
     }
 }
 
+fn restore_mmu_write_entry(addr: u32, region: &MemRegion, mmu: &mut [usize], vmem: Option<&mut VirtualMem>) {
+    let page_addr = addr & !(MMU_PAGE_SIZE as u32 - 1);
+    let base_offset = (page_addr - region.start as u32) & (region.size as u32 - 1);
+    let shm_offset = region.shm_offset + base_offset as usize;
+
+    for addr_offset in (region.start + base_offset as usize..region.end).step_by(region.size) {
+        mmu[addr_offset >> MMU_PAGE_SHIFT] = shm_offset;
+    }
+    if let Some(vmem) = vmem {
+        vmem.set_region_protection(page_addr as usize, MMU_PAGE_SIZE, region, true, true, false);
+    }
+}
+
 impl MmuArm9 {
     pub fn new() -> Self {
         let vmem_tcm = VirtualMem::new(V_MEM_ARM9_RANGE as _, ARM9.mmu_tcm_addr()).unwrap();
@@ -419,6 +432,19 @@ impl Emu {
                 remove_mmu_write_entry(addr, region, self.mem.mmu_arm9.mmu_write_tcm.as_mut(), Some(&mut self.mem.mmu_arm9.vmem_tcm));
             }
             ARM7 => remove_mmu_write_entry(addr, region, self.mem.mmu_arm7.mmu_write.as_mut(), Some(&mut self.mem.mmu_arm7.vmem)),
+        }
+    }
+
+    /// Restore direct fastmem writes after the final live JIT range on a protected physical
+    /// page has been invalidated. MAIN is shared by both CPUs, so both aliases must be writable
+    /// again together. ITCM exists only in the ARM9 TCM view.
+    pub fn mmu_restore_jit_write(&mut self, addr: u32, region: &MemRegion) {
+        if region.start == MAIN_REGION.start {
+            restore_mmu_write_entry(addr, region, self.mem.mmu_arm9.mmu_write.as_mut(), None);
+            restore_mmu_write_entry(addr, region, self.mem.mmu_arm9.mmu_write_tcm.as_mut(), Some(&mut self.mem.mmu_arm9.vmem_tcm));
+            restore_mmu_write_entry(addr, region, self.mem.mmu_arm7.mmu_write.as_mut(), Some(&mut self.mem.mmu_arm7.vmem));
+        } else if region.start == ITCM_REGION.start && region.shm_offset == ITCM_REGION.shm_offset {
+            restore_mmu_write_entry(addr, region, self.mem.mmu_arm9.mmu_write_tcm.as_mut(), Some(&mut self.mem.mmu_arm9.vmem_tcm));
         }
     }
 }

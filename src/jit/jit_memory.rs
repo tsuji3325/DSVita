@@ -420,6 +420,44 @@ impl Emu {
         }
     }
 
+    /// Handle the common "write to a page made read-only only because it contains JIT code"
+    /// case without permanently patching this store instruction to slowmem.
+    ///
+    /// This follows the write-tracking idea used by the Vita Azahar port: invalidate the guest
+    /// code touched by the write, and if that was the final live code on the physical page,
+    /// restore write permission and retry the original host store.
+    pub fn jit_try_retry_protected_write<const CPU: CpuType>(&mut self, guest_addr: u32, size: usize) -> bool {
+        let region = match guest_addr & 0x0F000000 {
+            regions::MAIN_OFFSET => &regions::MAIN_REGION,
+            regions::ITCM_OFFSET | regions::ITCM_OFFSET2 if CPU == ARM9 => {
+                if guest_addr >= self.cp15.itcm_size || self.cp15.itcm_state != crate::core::cp15::TcmState::RW {
+                    return false;
+                }
+                &regions::ITCM_REGION
+            }
+            _ => return false,
+        };
+
+        self.jit.invalidate_block(guest_addr, size);
+
+        let page_addr = guest_addr & !(crate::core::memory::mmu::MMU_PAGE_SIZE as u32 - 1);
+        let physical_offset = (page_addr as usize - region.start) & (region.size - 1);
+
+        // A MemRegion may be mirrored many times. Protection is applied to every mirror of
+        // the physical page, so it is safe to restore writes only when none of those aliases
+        // still contains live JIT code.
+        for mirror in (region.start + physical_offset..region.end).step_by(region.size) {
+            for offset in (0..crate::core::memory::mmu::MMU_PAGE_SIZE).step_by(JIT_LIVE_RANGE_PAGE_SIZE as usize) {
+                if self.jit.jit_memory_map.has_jit_block((mirror + offset) as u32) {
+                    return false;
+                }
+            }
+        }
+
+        self.mmu_restore_jit_write(page_addr, region);
+        true
+    }
+
     pub fn jit_set_live_range(&mut self, guest_pc: u32, guest_pc_end: u32, thumb: bool) {
         // >> 3 for u8 (each bit represents a page)
         let guest_pc_end = guest_pc_end - if thumb { 2 } else { 4 };
@@ -774,6 +812,23 @@ impl JitMemory {
 
     pub fn get_jit_start_addr(&self, guest_pc: u32) -> *const extern "C" fn(u32) {
         unsafe { (*self.jit_memory_map.get_jit_entry(guest_pc)).0 }
+    }
+
+    #[cfg(target_arch = "arm")]
+    pub unsafe fn faulting_single_write_size(&mut self, host_pc: usize) -> Option<usize> {
+        if !self.is_in_jit_mem(host_pc) {
+            return None;
+        }
+        let metadata = self.find_guest_inst_metadata(host_pc);
+        match metadata.s.fast.op {
+            Op::Str(transfer) | Op::StrT(transfer) => {
+                let size = 1usize << transfer.size();
+                // Keep doubleword stores on the existing slow patch path: they can straddle a
+                // page and need the handler's exact two-word semantics.
+                (size <= 4).then_some(size)
+            }
+            _ => None,
+        }
     }
 
     #[inline(never)]
