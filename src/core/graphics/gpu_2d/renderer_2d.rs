@@ -397,6 +397,12 @@ struct Gpu2DProgram {
     vram_display: Gpu2DVramDisplayProgram,
 
     blend_3d_fbo: GpuFbo,
+
+    // Per engine. Initialized "active" so the first frame always establishes known-empty
+    // contents for every render target.
+    previous_bg_mask: [u8; 2],
+    previous_obj_active: [bool; 2],
+    previous_window_active: [bool; 2],
 }
 
 macro_rules! draw_scanlines {
@@ -492,6 +498,9 @@ impl Gpu2DProgram {
                 bg_ubo,
                 vram_display: Gpu2DVramDisplayProgram::new(gpu_programs),
                 blend_3d_fbo: GpuFbo::new(DISPLAY_WIDTH as _, DISPLAY_HEIGHT as _, false, false).unwrap(),
+                previous_bg_mask: [0xF; 2],
+                previous_obj_active: [true; 2],
+                previous_window_active: [true; 2],
             }
         }
     }
@@ -819,7 +828,40 @@ impl Gpu2DProgram {
         blend_fbo_color
     }
 
-    unsafe fn draw(&mut self, common: &Gpu2DCommon, regs: &Gpu2DRenderRegs, texs: &Gpu2DTextures, mem: Gpu2DMem, lcdc_pal: GLuint) {
+    unsafe fn draw(&mut self, common: &Gpu2DCommon, regs: &Gpu2DRenderRegs, texs: &Gpu2DTextures, mem: Gpu2DMem, lcdc_pal: GLuint, engine_index: usize) {
+        let mut bg_mask = 0u8;
+        let mut obj_active = false;
+        let mut window_active = false;
+
+        for &disp_cnt_raw in &regs.disp_cnts {
+            let disp_cnt = DispCnt::from(disp_cnt_raw);
+            if disp_cnt.screen_display_bg0() {
+                bg_mask |= 1 << 0;
+            }
+            if disp_cnt.screen_display_bg1() {
+                bg_mask |= 1 << 1;
+            }
+            if disp_cnt.screen_display_bg2() {
+                bg_mask |= 1 << 2;
+            }
+            if disp_cnt.screen_display_bg3() {
+                bg_mask |= 1 << 3;
+            }
+            obj_active |= disp_cnt.screen_display_obj();
+            window_active |= disp_cnt.is_any_window_enabled();
+        }
+
+        // VRAM-display draws into BG0 even when the normal BG0 enable bit is irrelevant.
+        if lcdc_pal != 0 {
+            bg_mask |= 1;
+        }
+
+        let previous_bg_mask = self.previous_bg_mask[engine_index];
+        let previous_obj_active = self.previous_obj_active[engine_index];
+        let previous_window_active = self.previous_window_active[engine_index];
+        self.previous_bg_mask[engine_index] = bg_mask;
+        self.previous_obj_active[engine_index] = obj_active;
+        self.previous_window_active[engine_index] = window_active;
         if cfg!(not(target_os = "vita")) {
             gl::BindTexture(gl::TEXTURE_2D, texs.oam);
             sub_mem_texture1d(regions::OAM_SIZE / 2, mem.oam.as_ptr());
@@ -828,57 +870,59 @@ impl Gpu2DProgram {
             sub_mem_texture2d(texs.obj_width, texs.obj_height, mem.obj.as_ptr());
         }
 
-        {
-            gl::ActiveTexture(gl::TEXTURE0);
-            gl::BindTexture(gl::TEXTURE_2D, texs.oam);
-
-            gl::ActiveTexture(gl::TEXTURE1);
-            gl::BindTexture(gl::TEXTURE_2D, texs.obj);
-
-            gl::BindFramebuffer(gl::FRAMEBUFFER, common.win_obj_fbo.fbo);
-            gl::Viewport(0, 0, DISPLAY_WIDTH as _, DISPLAY_HEIGHT as _);
-            gl::ClearColor(0f32, 0f32, 0f32, 0f32);
-            gl::Clear(gl::COLOR_BUFFER_BIT);
-
-            gl::BindBuffer(gl::UNIFORM_BUFFER, common.win_bg_ubo);
-            gl::BufferData(gl::UNIFORM_BUFFER, size_of::<WinBgUbo>() as _, ptr::addr_of!(regs.win_bg_ubo) as _, gl::DYNAMIC_DRAW);
-            gl::BindBufferBase(gl::UNIFORM_BUFFER, 0, common.win_bg_ubo);
-
-            let mut draw_objects = |from_line, to_line| self.draw_objects::<true>(regs, &mem, texs.obj_heightf, from_line, to_line);
-            draw_scanlines!(regs, draw_objects, 0, false);
-
-            gl::BindTexture(gl::TEXTURE_2D, 0);
-            gl::BindVertexArray(0);
-            gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
-        }
-
-        {
-            gl::BindFramebuffer(gl::FRAMEBUFFER, common.win_bg_fbo.fbo);
-            gl::Viewport(0, 0, DISPLAY_WIDTH as _, DISPLAY_HEIGHT as _);
-            // Default all layers enabled: scanlines with no window drawn keep this and show
-            // everything (draw_windows early-returns when no window is enabled)
-            if common.win_bg_fbo.is_integer() {
-                gl::ClearBufferuiv(gl::COLOR, 0, [u8::MAX as u32, 0, 0, 0].as_ptr());
-            } else {
-                gl::ClearColor(1f32, 0f32, 0f32, 0f32);
+        if window_active || previous_window_active {
+            {
+                gl::ActiveTexture(gl::TEXTURE0);
+                gl::BindTexture(gl::TEXTURE_2D, texs.oam);
+    
+                gl::ActiveTexture(gl::TEXTURE1);
+                gl::BindTexture(gl::TEXTURE_2D, texs.obj);
+    
+                gl::BindFramebuffer(gl::FRAMEBUFFER, common.win_obj_fbo.fbo);
+                gl::Viewport(0, 0, DISPLAY_WIDTH as _, DISPLAY_HEIGHT as _);
+                gl::ClearColor(0f32, 0f32, 0f32, 0f32);
                 gl::Clear(gl::COLOR_BUFFER_BIT);
+    
+                gl::BindBuffer(gl::UNIFORM_BUFFER, common.win_bg_ubo);
+                gl::BufferData(gl::UNIFORM_BUFFER, size_of::<WinBgUbo>() as _, ptr::addr_of!(regs.win_bg_ubo) as _, gl::DYNAMIC_DRAW);
+                gl::BindBufferBase(gl::UNIFORM_BUFFER, 0, common.win_bg_ubo);
+    
+                let mut draw_objects = |from_line, to_line| self.draw_objects::<true>(regs, &mem, texs.obj_heightf, from_line, to_line);
+                draw_scanlines!(regs, draw_objects, 0, false);
+    
+                gl::BindTexture(gl::TEXTURE_2D, 0);
+                gl::BindVertexArray(0);
+                gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
             }
-
-            gl::UseProgram(common.win_bg_program);
-
-            gl::ActiveTexture(gl::TEXTURE0);
-            gl::BindTexture(gl::TEXTURE_2D, common.win_obj_fbo.color);
-
-            gl::BindBufferBase(gl::UNIFORM_BUFFER, 0, common.win_bg_ubo);
-
-            let draw_windows = |from_line, to_line| self.draw_windows(common, regs, from_line, to_line);
-            draw_scanlines!(regs, draw_windows, 0, false);
-
-            gl::BindBuffer(gl::UNIFORM_BUFFER, 0);
-            gl::UseProgram(0);
-            gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
+            {
+                gl::BindFramebuffer(gl::FRAMEBUFFER, common.win_bg_fbo.fbo);
+                gl::Viewport(0, 0, DISPLAY_WIDTH as _, DISPLAY_HEIGHT as _);
+                // Default all layers enabled: scanlines with no window drawn keep this and show
+                // everything (draw_windows early-returns when no window is enabled)
+                if common.win_bg_fbo.is_integer() {
+                    gl::ClearBufferuiv(gl::COLOR, 0, [u8::MAX as u32, 0, 0, 0].as_ptr());
+                } else {
+                    gl::ClearColor(1f32, 0f32, 0f32, 0f32);
+                    gl::Clear(gl::COLOR_BUFFER_BIT);
+                }
+    
+                gl::UseProgram(common.win_bg_program);
+    
+                gl::ActiveTexture(gl::TEXTURE0);
+                gl::BindTexture(gl::TEXTURE_2D, common.win_obj_fbo.color);
+    
+                gl::BindBufferBase(gl::UNIFORM_BUFFER, 0, common.win_bg_ubo);
+    
+                let draw_windows = |from_line, to_line| self.draw_windows(common, regs, from_line, to_line);
+                draw_scanlines!(regs, draw_windows, 0, false);
+    
+                gl::BindBuffer(gl::UNIFORM_BUFFER, 0);
+                gl::UseProgram(0);
+                gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
+            }
+    
+    
         }
-
         if cfg!(not(target_os = "vita")) {
             gl::BindTexture(gl::TEXTURE_2D, texs.pal);
             sub_pal_texture1d(regions::STANDARD_PALETTES_SIZE / 2, mem.pal.as_ptr());
@@ -889,40 +933,44 @@ impl Gpu2DProgram {
 
         gl::BindTexture(gl::TEXTURE_2D, 0);
 
-        {
-            gl::ActiveTexture(gl::TEXTURE0);
-            gl::BindTexture(gl::TEXTURE_2D, texs.oam);
-
-            gl::ActiveTexture(gl::TEXTURE1);
-            gl::BindTexture(gl::TEXTURE_2D, texs.obj);
-
-            gl::ActiveTexture(gl::TEXTURE2);
-            gl::BindTexture(gl::TEXTURE_2D, texs.pal);
-
-            gl::ActiveTexture(gl::TEXTURE3);
-            gl::BindTexture(gl::TEXTURE_2D, texs.obj_ext_pal);
-
-            gl::ActiveTexture(gl::TEXTURE4);
-            gl::BindTexture(gl::TEXTURE_2D, common.win_bg_fbo.color);
-
-            gl::BindFramebuffer(gl::FRAMEBUFFER, common.obj_fbo.fbo);
-            gl::Viewport(0, 0, DISPLAY_WIDTH as _, DISPLAY_HEIGHT as _);
-            gl::ClearColor(0f32, 0f32, 0f32, 0f32);
-            gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
-
-            gl::Enable(gl::DEPTH_TEST);
-            gl::DepthFunc(gl::LESS);
-
-            let mut draw_objects = |from_line, to_line| self.draw_objects::<false>(regs, &mem, texs.obj_heightf, from_line, to_line);
-            draw_scanlines!(regs, draw_objects, 0, false);
-
-            gl::Disable(gl::DEPTH_TEST);
-            gl::Disable(gl::BLEND);
-            gl::BindTexture(gl::TEXTURE_2D, 0);
-            gl::BindVertexArray(0);
-            gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
-        }
-
+        if obj_active || previous_obj_active {
+            {
+                gl::ActiveTexture(gl::TEXTURE0);
+                gl::BindTexture(gl::TEXTURE_2D, texs.oam);
+    
+                gl::ActiveTexture(gl::TEXTURE1);
+                gl::BindTexture(gl::TEXTURE_2D, texs.obj);
+    
+                gl::ActiveTexture(gl::TEXTURE2);
+                gl::BindTexture(gl::TEXTURE_2D, texs.pal);
+    
+                gl::ActiveTexture(gl::TEXTURE3);
+                gl::BindTexture(gl::TEXTURE_2D, texs.obj_ext_pal);
+    
+                gl::ActiveTexture(gl::TEXTURE4);
+                gl::BindTexture(gl::TEXTURE_2D, common.win_bg_fbo.color);
+    
+                gl::BindFramebuffer(gl::FRAMEBUFFER, common.obj_fbo.fbo);
+                gl::Viewport(0, 0, DISPLAY_WIDTH as _, DISPLAY_HEIGHT as _);
+                gl::ClearColor(0f32, 0f32, 0f32, 0f32);
+                gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
+    
+                gl::Enable(gl::DEPTH_TEST);
+                gl::DepthFunc(gl::LESS);
+    
+                if obj_active {
+                    let mut draw_objects = |from_line, to_line| self.draw_objects::<false>(regs, &mem, texs.obj_heightf, from_line, to_line);
+                    draw_scanlines!(regs, draw_objects, 0, false);
+                }
+    
+                gl::Disable(gl::DEPTH_TEST);
+                gl::Disable(gl::BLEND);
+                gl::BindTexture(gl::TEXTURE_2D, 0);
+                gl::BindVertexArray(0);
+                gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
+            }
+    
+            }
         if cfg!(not(target_os = "vita")) {
             gl::BindTexture(gl::TEXTURE_2D, texs.bg);
             sub_mem_texture2d(texs.bg_width, texs.bg_height, mem.bg.as_ptr());
@@ -932,7 +980,11 @@ impl Gpu2DProgram {
         }
 
         {
+            let clear_mask = bg_mask | previous_bg_mask;
             for i in 0..4 {
+                if clear_mask & (1 << i) == 0 {
+                    continue;
+                }
                 gl::BindFramebuffer(gl::FRAMEBUFFER, common.bg_fbos[i].fbo);
                 gl::Viewport(0, 0, DISPLAY_WIDTH as _, DISPLAY_HEIGHT as _);
                 if common.bg_fbos[i].is_integer() {
@@ -943,13 +995,15 @@ impl Gpu2DProgram {
                 }
             }
 
-            gl::BindBuffer(gl::UNIFORM_BUFFER, self.bg_ubo);
-            gl::BufferData(gl::UNIFORM_BUFFER, size_of::<BgUbo>() as _, ptr::addr_of!(regs.bg_ubo) as _, gl::DYNAMIC_DRAW);
+            if bg_mask != 0 {
+                gl::BindBuffer(gl::UNIFORM_BUFFER, self.bg_ubo);
+                gl::BufferData(gl::UNIFORM_BUFFER, size_of::<BgUbo>() as _, ptr::addr_of!(regs.bg_ubo) as _, gl::DYNAMIC_DRAW);
 
-            let draw_bg = |from_line, to_line| self.draw_bg(common, regs, texs, from_line, to_line);
-            draw_scanlines!(regs, draw_bg, 0, true);
+                let draw_bg = |from_line, to_line| self.draw_bg(common, regs, texs, from_line, to_line);
+                draw_scanlines!(regs, draw_bg, 0, true);
 
-            gl::BindTexture(gl::TEXTURE_2D, 0);
+                gl::BindTexture(gl::TEXTURE_2D, 0);
+            }
         }
 
         if lcdc_pal != 0 {
@@ -1142,8 +1196,9 @@ impl Gpu2DRenderer {
                 &self.texs[0],
                 Gpu2DMem::new::<{ A }>(mem_refs),
                 if regs.has_vram_display[0] { self.lcdc_pal } else { 0 },
+                0,
             ),
-            B => self.program.draw(&self.common, &regs.regs_b[0], &self.texs[1], Gpu2DMem::new::<{ B }>(mem_refs), 0),
+            B => self.program.draw(&self.common, &regs.regs_b[0], &self.texs[1], Gpu2DMem::new::<{ B }>(mem_refs), 0, 1),
         }
     }
 
