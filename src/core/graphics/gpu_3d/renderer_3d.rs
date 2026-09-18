@@ -293,9 +293,6 @@ impl Gpu3DDraw {
 struct Prepared3DFrame {
     assembled_draws: HeapArray<Gpu3DDraw, POLYGON_LIMIT>,
     assembled_draw_count: u16,
-    vertices: HeapArray<Vertex, VERTEX_LIMIT>,
-    vertices_count: u16,
-
     // GL-independent render geometry built on Core1. The render thread only uploads/draws it.
     gpu_vertices: HeapArray<Gpu3DVertex, VERTEX_LIMIT>,
     gpu_vertices_count: u16,
@@ -315,8 +312,6 @@ impl Default for Prepared3DFrame {
         Self {
             assembled_draws: HeapArray::default(),
             assembled_draw_count: 0,
-            vertices: HeapArray::default(),
-            vertices_count: 0,
             gpu_vertices: HeapArray::default(),
             gpu_vertices_count: 0,
             translucent_polygons: Vec::new(),
@@ -335,7 +330,6 @@ impl Prepared3DFrame {
     #[inline]
     fn reset_for_prepare(&mut self) {
         self.assembled_draw_count = 0;
-        self.vertices_count = 0;
         self.gpu_vertices_count = 0;
         self.translucent_polygons.clear();
         self.indices_opaque.clear();
@@ -364,21 +358,10 @@ pub struct Gpu3DRenderer {
     prepare_frame_index: usize,
     render_frame_index: usize,
 
-    translucent_polygons: Vec<u16>,
-
     vertices_buf: PtrWrapper<[Gpu3DVertex; VERTEX_LIMIT]>,
-    vertices_buf_count: u16,
-
-    indices_opaque: Vec<u16>,
-    indices_translucent: Vec<u16>,
 
     texture_cache: Texture3DCache,
     texture_ids_to_delete: Vec<GLuint>,
-    active_texture_id: GLuint,
-    active_polygon_attr: Gpu3DDrawAttr,
-    active_tex_image_param: TexImageParam,
-    indices_opaque_batches: Vec<IndicesBatch>,
-    indices_translucent_batches: Vec<IndicesBatch>,
     vram_ready: AtomicBool,
     // Core1 previously busy-spun at 100% while waiting for the render thread to finish
     // reading VRAM. Keep a very short spin for sub-microsecond handoffs, then sleep.
@@ -408,24 +391,13 @@ impl Gpu3DRenderer {
             prepare_frame_index: 0,
             render_frame_index: 1,
 
-            translucent_polygons: Vec::new(),
-
             #[cfg(not(target_os = "vita"))]
             vertices_buf: PtrWrapper::null(),
             #[cfg(target_os = "vita")]
             vertices_buf: unsafe { PtrWrapper::new(crate::presenter::Presenter::gl_mem_align_ram(16, size_of::<Gpu3DVertex>() * VERTEX_LIMIT) as _) },
-            vertices_buf_count: 0,
-
-            indices_opaque: Vec::new(),
-            indices_translucent: Vec::new(),
 
             texture_ids_to_delete: Vec::new(),
             texture_cache: Texture3DCache::new(),
-            active_texture_id: u32::MAX,
-            active_polygon_attr: Gpu3DDrawAttr::default(),
-            active_tex_image_param: TexImageParam::default(),
-            indices_opaque_batches: Vec::new(),
-            indices_translucent_batches: Vec::new(),
             vram_ready: AtomicBool::new(false),
             vram_ready_mutex: Mutex::new(()),
             vram_ready_condvar: Condvar::new(),
@@ -749,6 +721,7 @@ impl Gpu3DRenderer {
 
     unsafe fn add_prepared_vertices<const TRANSLUCENT_ONLY: bool>(
         frame: &mut Prepared3DFrame,
+        source_vertices: *const Vertex,
         draw_index: u16,
         active_texture_key: &mut u64,
         active_tex_image_param: &mut TexImageParam,
@@ -820,7 +793,7 @@ impl Gpu3DRenderer {
         };
 
         for i in draw.vertex_start_index..draw.vertex_start_index + draw.vertex_count {
-            let vertex = frame.vertices.get_unchecked(i as usize);
+            let vertex = &*source_vertices.add(i as usize);
             let color = u16::from(vertex.data.color());
 
             let mut gpu_vertex = Gpu3DVertex {
@@ -837,7 +810,7 @@ impl Gpu3DRenderer {
         }
     }
 
-    unsafe fn prepare_render_geometry(&mut self, frame_index: usize) {
+    unsafe fn prepare_render_geometry(&mut self, frame_index: usize, source_vertices: *const Vertex) {
         let frame = &mut self.prepared_frames[frame_index];
         frame.gpu_vertices_count = 0;
         frame.translucent_polygons.clear();
@@ -857,6 +830,7 @@ impl Gpu3DRenderer {
             } else {
                 Self::add_prepared_vertices::<false>(
                     frame,
+                    source_vertices,
                     i,
                     &mut active_texture_key,
                     &mut active_tex_image_param,
@@ -879,6 +853,7 @@ impl Gpu3DRenderer {
             let draw_index = *frame.translucent_polygons.get_unchecked(i);
             Self::add_prepared_vertices::<true>(
                 frame,
+                source_vertices,
                 draw_index,
                 &mut active_texture_key,
                 &mut active_tex_image_param,
@@ -933,19 +908,12 @@ impl Gpu3DRenderer {
         self.process_vertices();
         self.assemble_draws(frame_index);
 
-        let vertex_count = self.buffer.vertices_count;
-        {
-            let frame = &mut self.prepared_frames[frame_index];
-            frame.vertices_count = vertex_count;
-            for i in 0..vertex_count {
-                *frame.vertices.get_unchecked_mut(i as usize) = *self.buffer.vertices.get_unchecked(i as usize);
-            }
-        }
+        // Consume the transformed DS vertices directly from Gpu3DBuffer. The previous pipeline
+        // copied the entire vertex array into Prepared3DFrame only to convert it immediately,
+        // wasting memory bandwidth on Core1.
+        let source_vertices = self.buffer.vertices.as_ptr();
+        self.prepare_render_geometry(frame_index, source_vertices);
         self.buffer.vertices_count = 0;
-
-        // CPU-only conversion/index/batch construction belongs on the Core1 worker and can run
-        // in parallel with the previous frame's GL rendering.
-        self.prepare_render_geometry(frame_index);
 
         self.wait_for_vram_ready();
         self.populate_tex_cache(frame_index, &mut common.mem_buf, mem_refs);
