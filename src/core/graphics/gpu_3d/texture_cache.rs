@@ -765,22 +765,29 @@ impl Texture3DCache {
 
     #[inline]
     fn register_sections(&mut self, key: u64, sections: Bitset<6>) {
-        for section in 0..DIRTY_SECTION_SLOTS {
-            if sections.contains(section) {
+        for word_index in 0..sections.0.len() {
+            let mut bits = sections.0[word_index];
+            while bits != 0 {
+                let bit = bits.trailing_zeros() as usize;
+                let section = (word_index << 5) + bit;
                 self.section_keys[section].push(key);
+                bits &= bits - 1;
             }
         }
     }
 
     #[inline]
     fn unregister_sections(&mut self, key: u64, sections: Bitset<6>) {
-        for section in 0..DIRTY_SECTION_SLOTS {
-            if !sections.contains(section) {
-                continue;
-            }
-            let keys = &mut self.section_keys[section];
-            if let Some(pos) = keys.iter().position(|&candidate| candidate == key) {
-                keys.swap_remove(pos);
+        for word_index in 0..sections.0.len() {
+            let mut bits = sections.0[word_index];
+            while bits != 0 {
+                let bit = bits.trailing_zeros() as usize;
+                let section = (word_index << 5) + bit;
+                let keys = &mut self.section_keys[section];
+                if let Some(pos) = keys.iter().position(|&candidate| candidate == key) {
+                    keys.swap_remove(pos);
+                }
+                bits &= bits - 1;
             }
         }
     }
@@ -814,9 +821,13 @@ impl Texture3DCache {
             // Common path: collect only textures that reference a physical section dirtied
             // since the previous GPU read. A key can span several dirty sections, so dedupe
             // before doing the more expensive mapping/hash validation.
-            for section in 0..DIRTY_SECTION_SLOTS {
-                if mem_buf.vram_banks.dirty_sections.contains(section) {
+            for word_index in 0..mem_buf.vram_banks.dirty_sections.0.len() {
+                let mut bits = mem_buf.vram_banks.dirty_sections.0[word_index];
+                while bits != 0 {
+                    let bit = bits.trailing_zeros() as usize;
+                    let section = (word_index << 5) + bit;
                     self.dirty_candidates.extend_from_slice(&self.section_keys[section]);
+                    bits &= bits - 1;
                 }
             }
             self.dirty_candidates.sort_unstable();
