@@ -564,6 +564,25 @@ impl Gpu2DProgram {
         }
     }
 
+    #[inline]
+    unsafe fn bind_bg_textures(&self, common: &Gpu2DCommon, texs: &Gpu2DTextures, fbo_3d: Option<&Gpu3DFbo>) {
+        // These four sources are shared by every BG draw in the engine. Binding them once per
+        // pass avoids 8+ VitaGL calls for every scanline-state segment/background combination.
+        gl::ActiveTexture(gl::TEXTURE0);
+        gl::BindTexture(gl::TEXTURE_2D, texs.bg);
+        gl::ActiveTexture(gl::TEXTURE1);
+        gl::BindTexture(gl::TEXTURE_2D, texs.pal);
+        gl::ActiveTexture(gl::TEXTURE2);
+        gl::BindTexture(gl::TEXTURE_2D, texs.bg_ext_pal);
+        gl::ActiveTexture(gl::TEXTURE3);
+        gl::BindTexture(gl::TEXTURE_2D, common.win_bg_fbo.color);
+
+        if let Some(fbo_3d) = fbo_3d {
+            gl::ActiveTexture(gl::TEXTURE4);
+            gl::BindTexture(gl::TEXTURE_2D, fbo_3d.color());
+        }
+    }
+
     unsafe fn draw_bg_program(&self, common: &Gpu2DCommon, regs: &Gpu2DRenderRegs, texs: &Gpu2DTextures, from_line: u8, to_line: u8, fbo_3d: Option<&Gpu3DFbo>, bg_num: u8, bg_mode: BgMode) {
         let bg_cnt = regs.bg_cnts[from_line as usize * 4 + bg_num as usize];
         let bg_cnt = BgCnt::from(bg_cnt);
@@ -595,27 +614,8 @@ impl Gpu2DProgram {
         gl::BindFramebuffer(gl::FRAMEBUFFER, common.bg_fbos[bg_num as usize].fbo);
         gl::Viewport(0, 0, DISPLAY_WIDTH as _, DISPLAY_HEIGHT as _);
 
-        gl::ActiveTexture(gl::TEXTURE0);
-        gl::BindTexture(gl::TEXTURE_2D, texs.bg);
-
-        gl::ActiveTexture(gl::TEXTURE1);
-        gl::BindTexture(gl::TEXTURE_2D, texs.pal);
-
-        gl::ActiveTexture(gl::TEXTURE2);
-        gl::BindTexture(gl::TEXTURE_2D, texs.bg_ext_pal);
-
-        gl::ActiveTexture(gl::TEXTURE3);
-        gl::BindTexture(gl::TEXTURE_2D, common.win_bg_fbo.color);
-
         if let Some(fbo_3d) = fbo_3d {
-            gl::ActiveTexture(gl::TEXTURE4);
-            gl::BindTexture(gl::TEXTURE_2D, fbo_3d.color());
-
             gl::Uniform1f(program.widescreen_invert_coefficient_loc, fbo_3d.widescreen_invert_coefficient);
-        }
-
-        if program.has_ubo {
-            gl::BindBufferBase(gl::UNIFORM_BUFFER, 0, self.bg_ubo);
         }
 
         let disp_cnt = [regs.disp_cnts[from_line as usize]];
@@ -690,6 +690,7 @@ impl Gpu2DProgram {
         fbo_3d: Option<&Gpu3DFbo>,
     ) -> GLuint {
         if let Some(fbo_3d) = fbo_3d {
+            self.bind_bg_textures(common, texs, Some(fbo_3d));
             let draw_bg = |from_line, to_line| {
                 let disp_cnt = DispCnt::from(regs.disp_cnts[from_line as usize]);
                 if let 0..=5 = u8::from(disp_cnt.bg_mode()) {
@@ -996,8 +997,10 @@ impl Gpu2DProgram {
             }
 
             if bg_mask != 0 {
+                self.bind_bg_textures(common, texs, None);
                 gl::BindBuffer(gl::UNIFORM_BUFFER, self.bg_ubo);
                 gl::BufferData(gl::UNIFORM_BUFFER, size_of::<BgUbo>() as _, ptr::addr_of!(regs.bg_ubo) as _, gl::DYNAMIC_DRAW);
+                gl::BindBufferBase(gl::UNIFORM_BUFFER, 0, self.bg_ubo);
 
                 let draw_bg = |from_line, to_line| self.draw_bg(common, regs, texs, from_line, to_line);
                 draw_scanlines!(regs, draw_bg, 0, true);
