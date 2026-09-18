@@ -835,9 +835,11 @@ impl Texture3DCache {
     pub fn get(&mut self, key: u64, mem_buf: &GpuMemBuf, mem_refs: &GpuMemRefs, texture_ids_to_delete: &mut Vec<GLuint>) -> &mut Texture3D {
         if let Some(texture_3d) = self.cache.get_mut(&key) {
             if texture_3d.in_use || !texture_3d.dirty {
-                texture_3d.last_used = self.use_stamp;
-                self.use_stamp = self.use_stamp.wrapping_add(1);
+                // LRU only needs frame-level recency. A texture can appear in several batches in
+                // one frame; don't repeatedly rewrite its stamp for every non-adjacent reuse.
                 if !texture_3d.in_use {
+                    texture_3d.last_used = self.use_stamp;
+                    self.use_stamp = self.use_stamp.wrapping_add(1);
                     texture_3d.in_use = true;
                     self.used_keys.push(key);
                 }
