@@ -168,13 +168,17 @@ impl Texture3D {
                 let texel_addr = vram_addr + ((tile_addr_base + bx) << 2);
                 let texels = utils::read_from_mem::<u32>(mem_refs.tex_rear_plane_image.as_ref(), texel_addr);
 
+                // Four 2-bit texels are packed in each source byte. Expand a whole row at
+                // once into four contiguous RGBA pixels instead of recomputing the destination
+                // index and shift inside a 16-iteration nested loop.
                 for y_offset in 0..4 {
-                    let y_texels = texels >> (y_offset << 3);
-                    for x_offset in 0..4 {
-                        let texel = (y_texels >> (x_offset << 1)) & 0x3;
-                        let index = (((by << 2) + y_offset) << (width_shift)) + (bx << 2) + x_offset;
-                        *self.data.get_unchecked_mut(index as usize) = colors[texel as usize];
-                    }
+                    let row = (texels >> (y_offset << 3)) as u8;
+                    let index = (((by << 2) + y_offset) << width_shift) + (bx << 2);
+                    let dst = self.data.as_mut_ptr().add(index as usize);
+                    *dst.add(0) = colors[(row & 0x3) as usize];
+                    *dst.add(1) = colors[((row >> 2) & 0x3) as usize];
+                    *dst.add(2) = colors[((row >> 4) & 0x3) as usize];
+                    *dst.add(3) = colors[(row >> 6) as usize];
                 }
             }
         }
@@ -304,20 +308,108 @@ impl Texture3D {
     unsafe fn decode_pal256(&mut self, mem_refs: &GpuMemRefs) {
         let vram_addr = (self.vram_addr as u32) << 3;
         let pal_addr = (self.pal_addr as u32) << 4;
-
+        let pixel_count = self.metadata.size() as usize;
+        let tex_mem = mem_refs.tex_rear_plane_image.as_ref();
+        let pal_mem = mem_refs.tex_pal.as_ref();
         let tbl_5_to_8 = utils::vld_5_to_8_tbl();
 
+        let tex_in_bounds = vram_addr as usize <= tex_mem.len().saturating_sub(pixel_count);
+        let pal_in_bounds = pal_addr as usize <= pal_mem.len().saturating_sub(256 * 2);
+
+        if tex_in_bounds && pal_in_bounds && pixel_count >= 256 {
+            // ARMv7 NEON has no general gather, but large PAL256 textures still benefit from
+            // expanding the 256-entry palette once with NEON and then doing cheap u8 -> u32
+            // indexed loads. This replaces one palette u16 load + one SIMD color conversion per
+            // texel group with 64 fixed SIMD conversions for the entire texture.
+            let mut rgba_palette: [u32; 256] = MaybeUninit::uninit().assume_init();
+            let pal_ptr = pal_mem.as_ptr().add(pal_addr as usize) as *const u16;
+            for base in (0..256).step_by(4) {
+                let packed = vld1_u16(pal_ptr.add(base));
+                let rgba = utils::vunpack_rgb5_to_rgb8::<false>(packed, tbl_5_to_8);
+                vst1q_u32(rgba_palette.as_mut_ptr().add(base), rgba);
+            }
+            if self.metadata.color_0_transparent() {
+                rgba_palette[0] = 0;
+            }
+
+            let src = tex_mem.as_ptr().add(vram_addr as usize);
+            let dst = self.data.as_mut_ptr();
+            let mut i = 0usize;
+
+            // Manual 8-pixel unroll helps ARMv7 hide the dependent palette-load latency.
+            while i + 8 <= pixel_count {
+                *dst.add(i) = rgba_palette[*src.add(i) as usize];
+                *dst.add(i + 1) = rgba_palette[*src.add(i + 1) as usize];
+                *dst.add(i + 2) = rgba_palette[*src.add(i + 2) as usize];
+                *dst.add(i + 3) = rgba_palette[*src.add(i + 3) as usize];
+                *dst.add(i + 4) = rgba_palette[*src.add(i + 4) as usize];
+                *dst.add(i + 5) = rgba_palette[*src.add(i + 5) as usize];
+                *dst.add(i + 6) = rgba_palette[*src.add(i + 6) as usize];
+                *dst.add(i + 7) = rgba_palette[*src.add(i + 7) as usize];
+                i += 8;
+            }
+            while i < pixel_count {
+                *dst.add(i) = rgba_palette[*src.add(i) as usize];
+                i += 1;
+            }
+            return;
+        }
+
+        if tex_in_bounds && pal_in_bounds {
+            // Small textures avoid the 1 KiB palette expansion cost, but still use a contiguous
+            // fast path with no per-texel bounds clamp.
+            let src = tex_mem.as_ptr().add(vram_addr as usize);
+            let pal_ptr = pal_mem.as_ptr().add(pal_addr as usize) as *const u16;
+            for i in (0..pixel_count).step_by(16) {
+                let count = min(16, pixel_count - i);
+                let mut colors: [u16; 16] = MaybeUninit::uninit().assume_init();
+
+                for j in 0..count {
+                    let pal_index = *src.add(i + j) as usize;
+                    colors[j] = if self.metadata.color_0_transparent() && pal_index == 0 {
+                        0
+                    } else {
+                        *pal_ptr.add(pal_index) | (1 << 15)
+                    };
+                }
+                for j in count..16 {
+                    colors[j] = 0;
+                }
+
+                let packed_colors = vld1_u16_x4(colors.as_ptr());
+                let packed_colors = [packed_colors.0, packed_colors.1, packed_colors.2, packed_colors.3];
+                for j in 0..4 {
+                    let out_base = i + (j << 2);
+                    if out_base >= pixel_count {
+                        break;
+                    }
+                    let rgba = utils::vunpack_rgb5_to_rgb8::<true>(packed_colors[j], tbl_5_to_8);
+                    if out_base + 4 <= pixel_count {
+                        vst1q_u32(self.data.as_mut_ptr().add(out_base), rgba);
+                    } else {
+                        let mut tmp = [0u32; 4];
+                        vst1q_u32(tmp.as_mut_ptr(), rgba);
+                        for k in 0..pixel_count - out_base {
+                            *self.data.as_mut_ptr().add(out_base + k) = tmp[k];
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
+        // Rare malformed/end-of-mapped-memory case: preserve the old saturating-address behavior.
         for i in (0..self.metadata.size()).step_by(16) {
             let mut colors: [u16; 16] = MaybeUninit::uninit().assume_init();
 
             for j in 0..16 {
-                let offset = min(vram_addr + i + j as u32, mem_refs.tex_rear_plane_image.len() as u32 - 1);
-                let pal_index = utils::read_from_mem::<u8>(mem_refs.tex_rear_plane_image.as_ref(), offset) as u32;
+                let offset = min(vram_addr + i + j as u32, tex_mem.len() as u32 - 1);
+                let pal_index = utils::read_from_mem::<u8>(tex_mem, offset) as u32;
                 if self.metadata.color_0_transparent() && pal_index == 0 {
                     colors[j] = 0;
                 } else {
-                    let offset = min(pal_addr + (pal_index << 1), mem_refs.tex_pal.len() as u32 - 2);
-                    colors[j] = utils::read_from_mem::<u16>(mem_refs.tex_pal.as_ref(), offset) | (1 << 15);
+                    let offset = min(pal_addr + (pal_index << 1), pal_mem.len() as u32 - 2);
+                    colors[j] = utils::read_from_mem::<u16>(pal_mem, offset) | (1 << 15);
                 }
             }
 
