@@ -221,7 +221,7 @@ struct Gpu3DTexMem {
     vertices_buf: HeapArray<Gpu3DVertex, VERTEX_LIMIT>,
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Copy, Clone)]
 #[repr(C)]
 struct Gpu3DVertex {
     coords: [f32; 4],
@@ -294,6 +294,16 @@ struct Prepared3DFrame {
     assembled_draw_count: u16,
     vertices: HeapArray<Vertex, VERTEX_LIMIT>,
     vertices_count: u16,
+
+    // GL-independent render geometry built on Core1. The render thread only uploads/draws it.
+    gpu_vertices: HeapArray<Gpu3DVertex, VERTEX_LIMIT>,
+    gpu_vertices_count: u16,
+    translucent_polygons: Vec<u16>,
+    indices_opaque: Vec<u16>,
+    indices_translucent: Vec<u16>,
+    indices_opaque_batches: Vec<IndicesBatch>,
+    indices_translucent_batches: Vec<IndicesBatch>,
+
     inner: Gpu3DRendererInner,
     pow_cnt1: PowCnt1,
     swap_buffers: SwapBuffers,
@@ -306,6 +316,13 @@ impl Default for Prepared3DFrame {
             assembled_draw_count: 0,
             vertices: HeapArray::default(),
             vertices_count: 0,
+            gpu_vertices: HeapArray::default(),
+            gpu_vertices_count: 0,
+            translucent_polygons: Vec::new(),
+            indices_opaque: Vec::new(),
+            indices_translucent: Vec::new(),
+            indices_opaque_batches: Vec::new(),
+            indices_translucent_batches: Vec::new(),
             inner: Gpu3DRendererInner::default(),
             pow_cnt1: PowCnt1::from(0),
             swap_buffers: SwapBuffers::default(),
@@ -318,11 +335,18 @@ impl Prepared3DFrame {
     fn reset_for_prepare(&mut self) {
         self.assembled_draw_count = 0;
         self.vertices_count = 0;
+        self.gpu_vertices_count = 0;
+        self.translucent_polygons.clear();
+        self.indices_opaque.clear();
+        self.indices_translucent.clear();
+        self.indices_opaque_batches.clear();
+        self.indices_translucent_batches.clear();
     }
 }
 
 struct IndicesBatch {
     indices_offset: usize,
+    tex_key: u64,
     tex: GLuint,
     tex_image_param: TexImageParam,
     attr: Gpu3DDrawAttr,
@@ -693,56 +717,73 @@ impl Gpu3DRenderer {
         }
     }
 
-    unsafe fn add_indices_batch<const TRANSLUCENT_ONLY: bool>(&mut self) {
+    #[inline]
+    unsafe fn add_prepared_indices_batch<const TRANSLUCENT_ONLY: bool>(
+        frame: &mut Prepared3DFrame,
+        active_texture_key: u64,
+        active_tex_image_param: TexImageParam,
+        active_polygon_attr: Gpu3DDrawAttr,
+    ) {
         let (indices_len, indices_batch) = if TRANSLUCENT_ONLY {
-            (self.indices_translucent.len(), &mut self.indices_translucent_batches)
+            (frame.indices_translucent.len(), &mut frame.indices_translucent_batches)
         } else {
-            (self.indices_opaque.len(), &mut self.indices_opaque_batches)
+            (frame.indices_opaque.len(), &mut frame.indices_opaque_batches)
         };
         if indices_len != 0 {
             indices_batch.push(IndicesBatch {
                 indices_offset: indices_len,
-                tex: self.active_texture_id,
-                tex_image_param: self.active_tex_image_param,
-                attr: self.active_polygon_attr,
+                tex_key: active_texture_key,
+                tex: u32::MAX,
+                tex_image_param: active_tex_image_param,
+                attr: active_polygon_attr,
             });
         }
     }
 
-    unsafe fn add_vertices<const TRANSLUCENT_ONLY: bool>(&mut self, frame_index: usize, draw_index: u16) {
+    unsafe fn add_prepared_vertices<const TRANSLUCENT_ONLY: bool>(
+        frame: &mut Prepared3DFrame,
+        draw_index: u16,
+        active_texture_key: &mut u64,
+        active_tex_image_param: &mut TexImageParam,
+        active_polygon_attr: &mut Gpu3DDrawAttr,
+    ) {
         assert_unchecked((draw_index as usize) < POLYGON_LIMIT);
-        let draw = self.prepared_frames[frame_index].assembled_draws[draw_index as usize];
+        let draw = frame.assembled_draws[draw_index as usize];
         let primitive_type = draw.attr.primitive_type();
 
-        // println!(
-        //     "renderer: translucent only {TRANSLUCENT_ONLY} polygon {polygon_index} type {:?} pal addr {:x} tex image param {:?} attr {:?}",
-        //     polygon.polygon_type,
-        //     (polygon.palette_addr as u32) << 3,
-        //     polygon.tex_image_param,
-        //     polygon.attr
-        // );
-
-        let texture_id = if draw.tex_image_param.format() != TextureFormat::None {
-            debug_assert_ne!(draw.texture_id, u32::MAX);
-            draw.texture_id
+        let texture_key = if draw.tex_image_param.format() != TextureFormat::None {
+            draw.key()
         } else {
-            u32::MAX
+            u64::MAX
         };
-
         let draw_attr = Gpu3DDrawAttr::from(draw.attr);
         let tex_image_param = u32::from(draw.tex_image_param) & 0x1C0F0000;
-        if self.active_texture_id != texture_id || u32::from(self.active_tex_image_param) != tex_image_param || self.active_polygon_attr.value != draw_attr.value {
-            self.add_indices_batch::<TRANSLUCENT_ONLY>();
-            self.active_texture_id = texture_id;
-            self.active_tex_image_param = TexImageParam::from(tex_image_param);
-            self.active_polygon_attr = draw_attr;
-        }
 
-        let draw = self.prepared_frames[frame_index].assembled_draws[draw_index as usize];
+        if *active_texture_key != texture_key
+            || u32::from(*active_tex_image_param) != tex_image_param
+            || active_polygon_attr.value != draw_attr.value
+        {
+            Self::add_prepared_indices_batch::<TRANSLUCENT_ONLY>(
+                frame,
+                *active_texture_key,
+                *active_tex_image_param,
+                *active_polygon_attr,
+            );
+            *active_texture_key = texture_key;
+            *active_tex_image_param = TexImageParam::from(tex_image_param);
+            *active_polygon_attr = draw_attr;
+        }
 
         let push_indices = |indices_buf: &mut Vec<u16>, vertex_index: u16, vertex_count: u16| match primitive_type {
             PrimitiveType::SeparateTriangles => indices_buf.extend(&[vertex_index, vertex_index + 1, vertex_index + 2]),
-            PrimitiveType::SeparateQuadliterals => indices_buf.extend(&[vertex_index, vertex_index + 1, vertex_index + 2, vertex_index, vertex_index + 2, vertex_index + 3]),
+            PrimitiveType::SeparateQuadliterals => indices_buf.extend(&[
+                vertex_index,
+                vertex_index + 1,
+                vertex_index + 2,
+                vertex_index,
+                vertex_index + 2,
+                vertex_index + 3,
+            ]),
             PrimitiveType::TriangleStrips => {
                 indices_buf.extend(&[vertex_index, vertex_index + 1, vertex_index + 2]);
                 for i in 3..vertex_count {
@@ -759,25 +800,20 @@ impl Gpu3DRenderer {
         };
 
         if TRANSLUCENT_ONLY {
-            push_indices(&mut self.indices_translucent, self.vertices_buf_count, draw.vertex_count);
+            push_indices(&mut frame.indices_translucent, frame.gpu_vertices_count, draw.vertex_count);
         } else {
-            push_indices(&mut self.indices_opaque, self.vertices_buf_count, draw.vertex_count);
+            push_indices(&mut frame.indices_opaque, frame.gpu_vertices_count, draw.vertex_count);
         }
 
-        // The DS depth-equal test passes within a margin (0x200 of 0xFFFFFF for z-buffering); bias
-        // equal-test polygons towards the viewer and rely on LEQUAL to emulate that. Clip space z
-        // spans twice the depth range, thus double the margin. W-buffering applies the bias to the
-        // fragment depth in the shader instead.
         const Z_EQUAL_MARGIN: f32 = 2.0 * 0x200 as f32 / 0xFFFFFF as f32;
-        let z_bias = if draw.attr.depth_test_equal() && !self.prepared_frames[frame_index].swap_buffers.depth_buffering_w() {
+        let z_bias = if draw.attr.depth_test_equal() && !frame.swap_buffers.depth_buffering_w() {
             Z_EQUAL_MARGIN
         } else {
             0.0
         };
 
         for i in draw.vertex_start_index..draw.vertex_start_index + draw.vertex_count {
-            let vertex = self.prepared_frames[frame_index].vertices.get_unchecked(i as usize);
-
+            let vertex = frame.vertices.get_unchecked(i as usize);
             let color = u16::from(vertex.data.color());
 
             let mut gpu_vertex = Gpu3DVertex {
@@ -789,11 +825,65 @@ impl Gpu3DRenderer {
             };
             gpu_vertex.coords[2] -= z_bias * gpu_vertex.coords[3];
 
-            // println!("{} {} add vertex {i} {:?}", draw_attr.id(), draw_attr.trans_new_depth(), gpu_vertex.coords);
-
-            *self.vertices_buf.get_unchecked_mut(self.vertices_buf_count as usize) = gpu_vertex;
-            self.vertices_buf_count += 1;
+            *frame.gpu_vertices.get_unchecked_mut(frame.gpu_vertices_count as usize) = gpu_vertex;
+            frame.gpu_vertices_count += 1;
         }
+    }
+
+    unsafe fn prepare_render_geometry(&mut self, frame_index: usize) {
+        let frame = &mut self.prepared_frames[frame_index];
+        frame.gpu_vertices_count = 0;
+        frame.translucent_polygons.clear();
+        frame.indices_opaque.clear();
+        frame.indices_translucent.clear();
+        frame.indices_opaque_batches.clear();
+        frame.indices_translucent_batches.clear();
+
+        let mut active_texture_key = u64::MAX;
+        let mut active_tex_image_param = TexImageParam::default();
+        let mut active_polygon_attr = Gpu3DDrawAttr::default();
+
+        for i in 0..frame.assembled_draw_count {
+            let draw = frame.assembled_draws[i as usize];
+            if draw.attr.is_translucent() || draw.tex_image_param.is_translucent() {
+                frame.translucent_polygons.push(i);
+            } else {
+                Self::add_prepared_vertices::<false>(
+                    frame,
+                    i,
+                    &mut active_texture_key,
+                    &mut active_tex_image_param,
+                    &mut active_polygon_attr,
+                );
+            }
+        }
+        Self::add_prepared_indices_batch::<false>(
+            frame,
+            active_texture_key,
+            active_tex_image_param,
+            active_polygon_attr,
+        );
+
+        active_texture_key = u64::MAX;
+        active_tex_image_param = TexImageParam::default();
+        active_polygon_attr = Gpu3DDrawAttr::default();
+
+        for i in 0..frame.translucent_polygons.len() {
+            let draw_index = *frame.translucent_polygons.get_unchecked(i);
+            Self::add_prepared_vertices::<true>(
+                frame,
+                draw_index,
+                &mut active_texture_key,
+                &mut active_tex_image_param,
+                &mut active_polygon_attr,
+            );
+        }
+        Self::add_prepared_indices_batch::<true>(
+            frame,
+            active_texture_key,
+            active_tex_image_param,
+            active_polygon_attr,
+        );
     }
 
     pub unsafe fn populate_tex_cache(&mut self, frame_index: usize, mem_buf: &mut GpuMemBuf, mem_refs: &GpuMemRefs) {
@@ -845,6 +935,10 @@ impl Gpu3DRenderer {
             }
         }
         self.buffer.vertices_count = 0;
+
+        // CPU-only conversion/index/batch construction belongs on the Core1 worker and can run
+        // in parallel with the previous frame's GL rendering.
+        self.prepare_render_geometry(frame_index);
 
         while !self.vram_ready.load(Ordering::SeqCst) {}
         self.populate_tex_cache(frame_index, &mut common.mem_buf, mem_refs);
@@ -989,22 +1083,29 @@ impl Gpu3DRenderer {
     /// copied into Prepared3DFrame, later cache replacement can no longer invalidate the frame by
     /// moving/freeing a cache allocation. GL deletions stay deferred until a later render pass.
     unsafe fn resolve_prepared_texture_ids(&mut self, frame_index: usize) {
-        let draw_count = self.prepared_frames[frame_index].assembled_draw_count;
-        for i in 0..draw_count {
-            let (format, key) = {
-                let draw = self.prepared_frames[frame_index].assembled_draws.get_unchecked(i as usize);
-                (draw.tex_image_param.format(), draw.key())
-            };
-            if format == TextureFormat::None {
-                continue;
-            }
+        let texture_cache = &mut self.texture_cache;
+        let frame = &mut self.prepared_frames[frame_index];
 
-            let texture_id = self
-                .texture_cache
-                .resolve_texture_id(key)
-                .unwrap_or(u32::MAX);
-            debug_assert_ne!(texture_id, u32::MAX);
-            self.prepared_frames[frame_index].assembled_draws.get_unchecked_mut(i as usize).texture_id = texture_id;
+        for batch in &mut frame.indices_opaque_batches {
+            batch.tex = if batch.tex_image_param.format() == TextureFormat::None {
+                u32::MAX
+            } else {
+                texture_cache.resolve_texture_id(batch.tex_key).unwrap_or(u32::MAX)
+            };
+            if batch.tex_image_param.format() != TextureFormat::None {
+                debug_assert_ne!(batch.tex, u32::MAX);
+            }
+        }
+
+        for batch in &mut frame.indices_translucent_batches {
+            batch.tex = if batch.tex_image_param.format() == TextureFormat::None {
+                u32::MAX
+            } else {
+                texture_cache.resolve_texture_id(batch.tex_key).unwrap_or(u32::MAX)
+            };
+            if batch.tex_image_param.format() != TextureFormat::None {
+                debug_assert_ne!(batch.tex, u32::MAX);
+            }
         }
     }
 
@@ -1037,46 +1138,17 @@ impl Gpu3DRenderer {
         gl::StencilMask(0xFF);
         gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT | gl::STENCIL_BUFFER_BIT);
 
-        self.vertices_buf_count = 0;
-        let assembled_draw_count = self.prepared_frames[frame_index].assembled_draw_count;
-        if assembled_draw_count == 0 {
+        let gpu_vertices_count = self.prepared_frames[frame_index].gpu_vertices_count;
+        if gpu_vertices_count == 0 {
             return;
         }
 
-        self.indices_opaque.clear();
-        self.indices_translucent.clear();
-        self.translucent_polygons.clear();
-        self.indices_opaque_batches.clear();
-        self.indices_translucent_batches.clear();
-
-        #[cfg(not(target_os = "vita"))]
+        // VitaGL wants a RAM allocation it owns for vglBufferData. The expensive vertex
+        // conversion already happened on Core1; this is now a single contiguous memcpy.
+        #[cfg(target_os = "vita")]
         {
-            self.vertices_buf = PtrWrapper::new(self.mem.vertices_buf.as_mut_ptr() as _);
-        }
-
-        self.active_texture_id = u32::MAX;
-        self.active_tex_image_param = TexImageParam::default();
-        self.active_polygon_attr = Gpu3DDrawAttr::default();
-        for i in 0..assembled_draw_count {
-            let draw = self.prepared_frames[frame_index].assembled_draws[i as usize];
-            if draw.attr.is_translucent() || draw.tex_image_param.is_translucent() {
-                self.translucent_polygons.push(i);
-            } else {
-                self.add_vertices::<false>(frame_index, i);
-            }
-        }
-        self.add_indices_batch::<false>();
-
-        self.active_texture_id = u32::MAX;
-        self.active_tex_image_param = TexImageParam::default();
-        self.active_polygon_attr = Gpu3DDrawAttr::default();
-        for i in 0..self.translucent_polygons.len() {
-            unsafe { self.add_vertices::<true>(frame_index, *self.translucent_polygons.get_unchecked(i)) };
-        }
-        self.add_indices_batch::<true>();
-
-        if self.vertices_buf_count == 0 {
-            return;
+            let src = self.prepared_frames[frame_index].gpu_vertices.as_ptr();
+            ptr::copy_nonoverlapping(src, self.vertices_buf.as_mut_ptr(), gpu_vertices_count as usize);
         }
 
         // println!("render");
@@ -1106,8 +1178,8 @@ impl Gpu3DRenderer {
         {
             gl::BufferData(
                 gl::ARRAY_BUFFER,
-                (size_of::<Gpu3DVertex>() * self.vertices_buf_count as usize) as _,
-                self.vertices_buf.as_ptr() as _,
+                (size_of::<Gpu3DVertex>() * gpu_vertices_count as usize) as _,
+                self.prepared_frames[frame_index].gpu_vertices.as_ptr() as _,
                 gl::DYNAMIC_DRAW,
             );
         }
@@ -1131,19 +1203,19 @@ impl Gpu3DRenderer {
         gl::EnableVertexAttribArray(4);
         gl::VertexAttribPointer(4, 2, gl::UNSIGNED_BYTE, gl::FALSE, size_of::<Gpu3DVertex>() as _, mem::offset_of!(Gpu3DVertex, tex_size) as _);
 
-        if !self.indices_opaque.is_empty() {
+        let frame = &self.prepared_frames[frame_index];
+        if !frame.indices_opaque.is_empty() {
             gl::DepthMask(gl::TRUE);
-
-            Self::draw_elements(false, program, &self.indices_opaque, &self.indices_opaque_batches);
+            Self::draw_elements(false, program, &frame.indices_opaque, &frame.indices_opaque_batches);
         }
 
-        if !self.indices_translucent.is_empty() {
+        if !frame.indices_translucent.is_empty() {
             gl::Enable(gl::BLEND);
 
             gl::BlendFuncSeparate(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA, gl::ONE, gl::ONE);
             gl::BlendEquationSeparate(gl::FUNC_ADD, gl::MAX);
 
-            Self::draw_elements(true, program, &self.indices_translucent, &self.indices_translucent_batches);
+            Self::draw_elements(true, program, &frame.indices_translucent, &frame.indices_translucent_batches);
         }
 
         gl::DepthMask(gl::TRUE);
