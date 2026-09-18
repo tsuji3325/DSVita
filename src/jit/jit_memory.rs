@@ -441,17 +441,27 @@ impl Emu {
         self.jit.invalidate_block(guest_addr, size);
 
         let page_addr = guest_addr & !(crate::core::memory::mmu::MMU_PAGE_SIZE as u32 - 1);
-        let physical_offset = (page_addr as usize - region.start) & (region.size - 1);
 
-        // A MemRegion may be mirrored many times. Protection is applied to every mirror of
-        // the physical page, so it is safe to restore writes only when none of those aliases
-        // still contains live JIT code.
-        for mirror in (region.start + physical_offset..region.end).step_by(region.size) {
-            for offset in (0..crate::core::memory::mmu::MMU_PAGE_SIZE).step_by(JIT_LIVE_RANGE_PAGE_SIZE as usize) {
-                if self.jit.jit_memory_map.has_jit_block((mirror + offset) as u32) {
-                    return false;
-                }
+        // JitEntries/JitLiveRanges already collapse memory mirrors onto the same physical
+        // backing, so inspect one 4 KiB guest page rather than walking every mirror alias.
+        let mut remaining_live_ranges = 0usize;
+        for offset in (0..crate::core::memory::mmu::MMU_PAGE_SIZE).step_by(JIT_LIVE_RANGE_PAGE_SIZE as usize) {
+            if self.jit.jit_memory_map.has_jit_block(page_addr + offset as u32) {
+                remaining_live_ranges += 1;
             }
+        }
+
+        if remaining_live_ranges != 0 {
+            // A protected page can contain a small amount of executable code next to data.
+            // Permanently slow-patching the store is costly, while throwing away a dense 4 KiB
+            // code page can cause a recompile/fault loop. For sparse mixed pages, invalidate the
+            // whole protection granule and keep the original direct STR. Dense pages retain the
+            // old slowmem fallback.
+            const SPARSE_PAGE_MAX_LIVE_RANGES: usize = 4;
+            if remaining_live_ranges > SPARSE_PAGE_MAX_LIVE_RANGES {
+                return false;
+            }
+            self.jit.invalidate_blocks(page_addr, crate::core::memory::mmu::MMU_PAGE_SIZE);
         }
 
         self.mmu_restore_jit_write(page_addr, region);
