@@ -25,7 +25,6 @@ use std::collections::HashMap;
 use std::hint::{assert_unchecked, unreachable_unchecked};
 use std::mem;
 use std::mem::MaybeUninit;
-use std::time::Instant;
 use xxhash_rust::xxh32::xxh32;
 
 #[bitsize(16)]
@@ -56,7 +55,7 @@ pub struct Texture3D {
     vram_addr: u16,
     pal_addr: u16,
     metadata: Texture3DMetadata,
-    last_used: Instant,
+    last_used: u64,
     tex_rear_plane_img_banks: [u8; 4],
     tex_palette_banks: [u8; 6],
     data: HeapDynamic<u32>,
@@ -520,7 +519,7 @@ impl Texture3D {
             vram_addr: draw.tex_image_param.vram_offset(),
             pal_addr: draw.pal_addr,
             metadata,
-            last_used: Instant::now(),
+            last_used: 0,
             tex_rear_plane_img_banks: vram.maps.tex_rear_plane_img_banks,
             tex_palette_banks: vram.maps.tex_palette_banks,
             data: unsafe { HeapDynamic::uninitialized(metadata.size() as usize) },
@@ -720,6 +719,9 @@ pub struct Texture3DCache {
     used_keys: Vec<u64>,
     last_tex_rear_plane_img_banks: [u8; 4],
     last_tex_palette_banks: [u8; 6],
+    // Monotonic LRU stamp. Querying a wall clock on every texture hit is unnecessary;
+    // the cache only needs relative ordering for eviction.
+    use_stamp: u64,
     total_size: u32,
 }
 
@@ -731,6 +733,7 @@ impl Texture3DCache {
             used_keys: Vec::new(),
             last_tex_rear_plane_img_banks: [u8::MAX; 4],
             last_tex_palette_banks: [u8::MAX; 6],
+            use_stamp: 1,
             total_size: 0,
         }
     }
@@ -745,6 +748,7 @@ impl Texture3DCache {
         }
         self.cache.clear();
         self.total_size = 0;
+        self.use_stamp = 1;
         self.used_keys.clear();
         for keys in &mut self.section_keys {
             keys.clear();
@@ -831,7 +835,8 @@ impl Texture3DCache {
         let key = draw.key();
         if let Some(texture_3d) = self.cache.get_mut(&key) {
             if texture_3d.in_use || !texture_3d.dirty {
-                texture_3d.last_used = Instant::now();
+                texture_3d.last_used = self.use_stamp;
+                self.use_stamp = self.use_stamp.wrapping_add(1);
                 if !texture_3d.in_use {
                     texture_3d.in_use = true;
                     self.used_keys.push(key);
@@ -851,7 +856,7 @@ impl Texture3DCache {
         let texture_3d = Texture3D::new(draw, &mem_buf.vram, mem_refs);
         while self.total_size + texture_3d.metadata.size() >= CACHE_SIZE_LIMIT {
             let mut oldest_key = 0;
-            let mut oldest_timestamp = Instant::now();
+            let mut oldest_timestamp = u64::MAX;
             let mut oldest_size = 0;
             unsafe { assert_unchecked(!self.cache.is_empty()) };
             for (&key, texture_3d) in &self.cache {
@@ -869,6 +874,9 @@ impl Texture3DCache {
                 texture_ids_to_delete.push(removed.texture_id);
             }
         }
+        let mut texture_3d = texture_3d;
+        texture_3d.last_used = self.use_stamp;
+        self.use_stamp = self.use_stamp.wrapping_add(1);
         let source_sections = texture_3d.source_sections;
         self.total_size += texture_3d.metadata.size();
         self.cache.insert(key, Box::new(texture_3d));
