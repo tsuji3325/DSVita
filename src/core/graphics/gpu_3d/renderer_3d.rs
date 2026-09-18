@@ -21,6 +21,7 @@ use std::arch::arm::{vcvt_n_f32_s32, vcvtq_n_f32_s32, vget_low_s32, vsetq_lane_s
 use std::hint::{assert_unchecked, spin_loop, unreachable_unchecked};
 use std::intrinsics::unlikely;
 use std::mem::{self, MaybeUninit};
+use std::ops::{Deref, DerefMut};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex};
@@ -130,6 +131,7 @@ impl Default for Gpu3DRendererInner {
 
 pub struct Gpu3DGl {
     vertices_buf: GLuint,
+    indices_buf: GLuint,
     program: Gpu3DShaderDepthPrograms,
     fbos: [Gpu3DFbo; 2],
 }
@@ -190,8 +192,11 @@ impl Gpu3DGl {
     fn new(gpu_programs: &GpuShadersPrograms) -> Self {
         unsafe {
             let mut vertices_buf = 0;
+            let mut indices_buf = 0;
             gl::GenBuffers(1, &mut vertices_buf);
+            gl::GenBuffers(1, &mut indices_buf);
             gl::BindBuffer(gl::ARRAY_BUFFER, vertices_buf);
+            gl::BindBuffer(gl::ELEMENT_ARRAY_BUFFER, indices_buf);
 
             gl::BindBuffer(gl::ELEMENT_ARRAY_BUFFER, 0);
             gl::BindBuffer(gl::ARRAY_BUFFER, 0);
@@ -199,6 +204,7 @@ impl Gpu3DGl {
 
             Gpu3DGl {
                 vertices_buf,
+                indices_buf,
                 program: gpu_programs.render_3d,
                 fbos: [Gpu3DFbo::new(4, WidescreenOption::Off, 1.0).unwrap(), Gpu3DFbo::new(4, WidescreenOption::Off, 1.0).unwrap()],
             }
@@ -231,6 +237,79 @@ struct Gpu3DVertex {
     color: [u8; 4],
     tex_size: [u8; 2],
 }
+
+const INDEX_LIMIT: usize = VERTEX_LIMIT * 3;
+
+/// Frame-local geometry storage. On Vita this is allocated from vitaGL's GPU-mapped
+/// RAM so Core1 writes the exact memory that GXM later consumes. Desktop builds keep
+/// the same fixed-array interface backed by the normal heap.
+struct GpuFrameArray<T, const SIZE: usize> {
+    #[cfg(target_os = "vita")]
+    ptr: *mut T,
+    #[cfg(not(target_os = "vita"))]
+    heap: HeapArray<T, SIZE>,
+}
+
+impl<T: Default, const SIZE: usize> Default for GpuFrameArray<T, SIZE> {
+    fn default() -> Self {
+        #[cfg(target_os = "vita")]
+        unsafe {
+            let ptr = crate::presenter::Presenter::gl_mem_align_ram(16, size_of::<T>() * SIZE) as *mut T;
+            assert!(!ptr.is_null());
+            ptr.write_bytes(0, SIZE);
+            GpuFrameArray { ptr }
+        }
+        #[cfg(not(target_os = "vita"))]
+        {
+            GpuFrameArray {
+                heap: HeapArray::default(),
+            }
+        }
+    }
+}
+
+impl<T, const SIZE: usize> GpuFrameArray<T, SIZE> {
+    #[inline]
+    fn as_ptr(&self) -> *const T {
+        #[cfg(target_os = "vita")]
+        {
+            self.ptr as *const T
+        }
+        #[cfg(not(target_os = "vita"))]
+        {
+            self.heap.as_ptr()
+        }
+    }
+
+    #[inline]
+    fn as_mut_ptr(&mut self) -> *mut T {
+        #[cfg(target_os = "vita")]
+        {
+            self.ptr
+        }
+        #[cfg(not(target_os = "vita"))]
+        {
+            self.heap.as_mut_ptr()
+        }
+    }
+}
+
+impl<T, const SIZE: usize> Deref for GpuFrameArray<T, SIZE> {
+    type Target = [T; SIZE];
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*(self.as_ptr() as *const [T; SIZE]) }
+    }
+}
+
+impl<T, const SIZE: usize> DerefMut for GpuFrameArray<T, SIZE> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { &mut *(self.as_mut_ptr() as *mut [T; SIZE]) }
+    }
+}
+
+unsafe impl<T: Send, const SIZE: usize> Send for GpuFrameArray<T, SIZE> {}
+unsafe impl<T: Sync, const SIZE: usize> Sync for GpuFrameArray<T, SIZE> {}
 
 #[bitsize(32)]
 #[derive(Copy, Clone, DebugBits, Default, FromBits)]
@@ -290,12 +369,15 @@ impl Gpu3DDraw {
 struct Prepared3DFrame {
     assembled_draws: HeapArray<Gpu3DDraw, POLYGON_LIMIT>,
     assembled_draw_count: u16,
-    // GL-independent render geometry built on Core1. The render thread only uploads/draws it.
-    gpu_vertices: HeapArray<Gpu3DVertex, VERTEX_LIMIT>,
+    // On Vita these buffers are GPU-mapped. Core1 prepares directly into the memory consumed
+    // by GXM, so the render thread does not memcpy vertices or per-batch indices anymore.
+    gpu_vertices: GpuFrameArray<Gpu3DVertex, VERTEX_LIMIT>,
     gpu_vertices_count: u16,
+    gpu_indices: GpuFrameArray<u16, INDEX_LIMIT>,
+    indices_opaque_count: usize,
+    indices_translucent_start: usize,
+    indices_translucent_count: usize,
     translucent_polygons: Vec<u16>,
-    indices_opaque: Vec<u16>,
-    indices_translucent: Vec<u16>,
     indices_opaque_batches: Vec<IndicesBatch>,
     indices_translucent_batches: Vec<IndicesBatch>,
 
@@ -309,11 +391,13 @@ impl Default for Prepared3DFrame {
         Self {
             assembled_draws: HeapArray::default(),
             assembled_draw_count: 0,
-            gpu_vertices: HeapArray::default(),
+            gpu_vertices: GpuFrameArray::default(),
             gpu_vertices_count: 0,
+            gpu_indices: GpuFrameArray::default(),
+            indices_opaque_count: 0,
+            indices_translucent_start: 0,
+            indices_translucent_count: 0,
             translucent_polygons: Vec::new(),
-            indices_opaque: Vec::new(),
-            indices_translucent: Vec::new(),
             indices_opaque_batches: Vec::new(),
             indices_translucent_batches: Vec::new(),
             inner: Gpu3DRendererInner::default(),
@@ -328,9 +412,10 @@ impl Prepared3DFrame {
     fn reset_for_prepare(&mut self) {
         self.assembled_draw_count = 0;
         self.gpu_vertices_count = 0;
+        self.indices_opaque_count = 0;
+        self.indices_translucent_start = 0;
+        self.indices_translucent_count = 0;
         self.translucent_polygons.clear();
-        self.indices_opaque.clear();
-        self.indices_translucent.clear();
         self.indices_opaque_batches.clear();
         self.indices_translucent_batches.clear();
     }
@@ -354,8 +439,6 @@ pub struct Gpu3DRenderer {
     prepared_frames: [Prepared3DFrame; 2],
     prepare_frame_index: usize,
     render_frame_index: usize,
-
-    vertices_buf: PtrWrapper<[Gpu3DVertex; VERTEX_LIMIT]>,
 
     texture_cache: Texture3DCache,
     texture_ids_to_delete: Vec<GLuint>,
@@ -388,11 +471,6 @@ impl Gpu3DRenderer {
             prepare_frame_index: 0,
             render_frame_index: 1,
 
-            #[cfg(not(target_os = "vita"))]
-            vertices_buf: PtrWrapper::null(),
-            #[cfg(target_os = "vita")]
-            vertices_buf: unsafe { PtrWrapper::new(crate::presenter::Presenter::gl_mem_align_ram(16, size_of::<Gpu3DVertex>() * VERTEX_LIMIT) as _) },
-
             texture_ids_to_delete: Vec::new(),
             texture_cache: Texture3DCache::new(),
             vram_ready: AtomicBool::new(false),
@@ -411,8 +489,12 @@ impl Gpu3DRenderer {
         self.buffer.pow_cnt1 = PowCnt1::from(0);
         self.prepare_frame_index = 0;
         self.render_frame_index = 1;
-        self.prepared_frames[0] = Prepared3DFrame::default();
-        self.prepared_frames[1] = Prepared3DFrame::default();
+        for frame in &mut self.prepared_frames {
+            frame.reset_for_prepare();
+            frame.inner = Gpu3DRendererInner::default();
+            frame.pow_cnt1 = PowCnt1::from(0);
+            frame.swap_buffers = SwapBuffers::default();
+        }
         self.texture_cache.clear();
 
         unsafe {
@@ -700,9 +782,9 @@ impl Gpu3DRenderer {
         active_polygon_attr: Gpu3DDrawAttr,
     ) {
         let (indices_len, indices_batch) = if TRANSLUCENT_ONLY {
-            (frame.indices_translucent.len(), &mut frame.indices_translucent_batches)
+            (frame.indices_translucent_count, &mut frame.indices_translucent_batches)
         } else {
-            (frame.indices_opaque.len(), &mut frame.indices_opaque_batches)
+            (frame.indices_opaque_count, &mut frame.indices_opaque_batches)
         };
         if indices_len != 0 {
             indices_batch.push(IndicesBatch {
@@ -750,9 +832,24 @@ impl Gpu3DRenderer {
             *active_polygon_attr = draw_attr;
         }
 
-        let push_indices = |indices_buf: &mut Vec<u16>, vertex_index: u16, vertex_count: u16| match primitive_type {
-            PrimitiveType::SeparateTriangles => indices_buf.extend(&[vertex_index, vertex_index + 1, vertex_index + 2]),
-            PrimitiveType::SeparateQuadliterals => indices_buf.extend(&[
+        let indices_base = if TRANSLUCENT_ONLY { frame.indices_translucent_start } else { 0 };
+        let mut indices_count = if TRANSLUCENT_ONLY {
+            frame.indices_translucent_count
+        } else {
+            frame.indices_opaque_count
+        };
+        let vertex_index = frame.gpu_vertices_count;
+        let mut emit = |values: &[u16]| {
+            let start = indices_base + indices_count;
+            let end = start + values.len();
+            debug_assert!(end <= INDEX_LIMIT);
+            frame.gpu_indices[start..end].copy_from_slice(values);
+            indices_count += values.len();
+        };
+
+        match primitive_type {
+            PrimitiveType::SeparateTriangles => emit(&[vertex_index, vertex_index + 1, vertex_index + 2]),
+            PrimitiveType::SeparateQuadliterals => emit(&[
                 vertex_index,
                 vertex_index + 1,
                 vertex_index + 2,
@@ -761,24 +858,24 @@ impl Gpu3DRenderer {
                 vertex_index + 3,
             ]),
             PrimitiveType::TriangleStrips => {
-                indices_buf.extend(&[vertex_index, vertex_index + 1, vertex_index + 2]);
-                for i in 3..vertex_count {
-                    let vertex_index = i + vertex_index;
-                    indices_buf.extend(&[vertex_index - 2, vertex_index - (!i & 1), vertex_index - (i & 1)]);
+                emit(&[vertex_index, vertex_index + 1, vertex_index + 2]);
+                for i in 3..draw.vertex_count {
+                    let index = i + vertex_index;
+                    emit(&[index - 2, index - (!i & 1), index - (i & 1)]);
                 }
             }
             PrimitiveType::QuadliteralStrips => {
-                indices_buf.extend(&[vertex_index, vertex_index + 1, vertex_index + 3, vertex_index, vertex_index + 3, vertex_index + 2]);
-                for i in (vertex_index + 4..vertex_index + vertex_count).step_by(2) {
-                    indices_buf.extend(&[i - 2, i - 1, i + 1, i - 2, i + 1, i]);
+                emit(&[vertex_index, vertex_index + 1, vertex_index + 3, vertex_index, vertex_index + 3, vertex_index + 2]);
+                for i in (vertex_index + 4..vertex_index + draw.vertex_count).step_by(2) {
+                    emit(&[i - 2, i - 1, i + 1, i - 2, i + 1, i]);
                 }
             }
-        };
+        }
 
         if TRANSLUCENT_ONLY {
-            push_indices(&mut frame.indices_translucent, frame.gpu_vertices_count, draw.vertex_count);
+            frame.indices_translucent_count = indices_count;
         } else {
-            push_indices(&mut frame.indices_opaque, frame.gpu_vertices_count, draw.vertex_count);
+            frame.indices_opaque_count = indices_count;
         }
 
         const Z_EQUAL_MARGIN: f32 = 2.0 * 0x200 as f32 / 0xFFFFFF as f32;
@@ -809,9 +906,10 @@ impl Gpu3DRenderer {
     unsafe fn prepare_render_geometry(&mut self, frame_index: usize, source_vertices: *const Vertex) {
         let frame = &mut self.prepared_frames[frame_index];
         frame.gpu_vertices_count = 0;
+        frame.indices_opaque_count = 0;
+        frame.indices_translucent_start = 0;
+        frame.indices_translucent_count = 0;
         frame.translucent_polygons.clear();
-        frame.indices_opaque.clear();
-        frame.indices_translucent.clear();
         frame.indices_opaque_batches.clear();
         frame.indices_translucent_batches.clear();
 
@@ -840,6 +938,7 @@ impl Gpu3DRenderer {
             active_tex_image_param,
             active_polygon_attr,
         );
+        frame.indices_translucent_start = frame.indices_opaque_count;
 
         active_texture_key = u64::MAX;
         active_tex_image_param = TexImageParam::default();
@@ -966,7 +1065,7 @@ impl Gpu3DRenderer {
         fbo
     }
 
-    unsafe fn draw_elements(translucent_only: bool, program: &Gpu3DShaderPrograms, indices: &[u16], indices_batch: &[IndicesBatch]) {
+    unsafe fn draw_elements(translucent_only: bool, program: &Gpu3DShaderPrograms, indices_base: usize, indices_batch: &[IndicesBatch]) {
         let mut previous_offset = 0;
 
         // VitaGL state changes are not free. Batches are already ordered for DS correctness, so
@@ -1124,8 +1223,8 @@ impl Gpu3DRenderer {
             }
 
             let count = batch.indices_offset - previous_offset;
-            let ptr = indices.as_ptr().add(previous_offset);
-            gl::DrawElements(gl::TRIANGLES, count as _, gl::UNSIGNED_SHORT, ptr as _);
+            let byte_offset = (indices_base + previous_offset) * size_of::<u16>();
+            gl::DrawElements(gl::TRIANGLES, count as _, gl::UNSIGNED_SHORT, byte_offset as *const _);
 
             if translucent_only && batch.attr.mode() == PolygonMode::Shadow && u8::from(batch.attr.id()) != 0 {
                 set_color_mask([true; 4], &mut color_mask);
@@ -1219,13 +1318,7 @@ impl Gpu3DRenderer {
             return;
         }
 
-        // VitaGL wants a RAM allocation it owns for vglBufferData. The expensive vertex
-        // conversion already happened on Core1; this is now a single contiguous memcpy.
-        #[cfg(target_os = "vita")]
-        {
-            let src = self.prepared_frames[frame_index].gpu_vertices.as_ptr();
-            ptr::copy_nonoverlapping(src, self.vertices_buf.as_mut_ptr(), gpu_vertices_count as usize);
-        }
+        // Frame geometry is already in GPU-mapped RAM on Vita. No render-thread memcpy.
 
         // println!("render");
 
@@ -1250,6 +1343,9 @@ impl Gpu3DRenderer {
         gl::Uniform1f(program.toon_highlight, u8::from(self.prepared_frames[frame_index].inner.disp_cnt.polygon_attr_shading()) as f32);
 
         gl::BindBuffer(gl::ARRAY_BUFFER, self.gl.vertices_buf);
+        gl::BindBuffer(gl::ELEMENT_ARRAY_BUFFER, self.gl.indices_buf);
+        let frame_indices_count =
+            self.prepared_frames[frame_index].indices_translucent_start + self.prepared_frames[frame_index].indices_translucent_count;
         #[cfg(not(target_os = "vita"))]
         {
             gl::BufferData(
@@ -1258,10 +1354,17 @@ impl Gpu3DRenderer {
                 self.prepared_frames[frame_index].gpu_vertices.as_ptr() as _,
                 gl::DYNAMIC_DRAW,
             );
+            gl::BufferData(
+                gl::ELEMENT_ARRAY_BUFFER,
+                (size_of::<u16>() * frame_indices_count) as _,
+                self.prepared_frames[frame_index].gpu_indices.as_ptr() as _,
+                gl::DYNAMIC_DRAW,
+            );
         }
         #[cfg(target_os = "vita")]
         {
-            crate::presenter::Presenter::gl_buffer_data(gl::ARRAY_BUFFER, self.vertices_buf.as_ptr() as _);
+            crate::presenter::Presenter::gl_buffer_data(gl::ARRAY_BUFFER, self.prepared_frames[frame_index].gpu_vertices.as_ptr() as _);
+            crate::presenter::Presenter::gl_buffer_data(gl::ELEMENT_ARRAY_BUFFER, self.prepared_frames[frame_index].gpu_indices.as_ptr() as _);
         }
 
         gl::EnableVertexAttribArray(0);
@@ -1280,19 +1383,19 @@ impl Gpu3DRenderer {
         gl::VertexAttribPointer(4, 2, gl::UNSIGNED_BYTE, gl::FALSE, size_of::<Gpu3DVertex>() as _, mem::offset_of!(Gpu3DVertex, tex_size) as _);
 
         let frame = &self.prepared_frames[frame_index];
-        if !frame.indices_opaque.is_empty() {
+        if frame.indices_opaque_count != 0 {
             gl::DepthMask(gl::TRUE);
             gl::Disable(gl::BLEND);
-            Self::draw_elements(false, program, &frame.indices_opaque, &frame.indices_opaque_batches);
+            Self::draw_elements(false, program, 0, &frame.indices_opaque_batches);
         }
 
-        if !frame.indices_translucent.is_empty() {
+        if frame.indices_translucent_count != 0 {
             gl::Enable(gl::BLEND);
 
             gl::BlendFuncSeparate(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA, gl::ONE, gl::ONE);
             gl::BlendEquationSeparate(gl::FUNC_ADD, gl::MAX);
 
-            Self::draw_elements(true, program, &frame.indices_translucent, &frame.indices_translucent_batches);
+            Self::draw_elements(true, program, frame.indices_translucent_start, &frame.indices_translucent_batches);
         }
 
         gl::DepthMask(gl::TRUE);
