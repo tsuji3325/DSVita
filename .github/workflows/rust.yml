@@ -27,8 +27,11 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Test 3D completion wait
+        run: python3 tools/test_3d_wait.py
+
       - name: Apply Japanese UI
-        if: github.ref_name == 'japanese-ui' || github.ref_name == 'japanese-font-fix'
+        if: github.ref_name == 'japanese-ui' || github.ref_name == 'japanese-font-fix' || github.ref_name == 'transition-sync-fix'
         run: python3 tools/apply_japanese_ui.py
 
       - name: Install clang 21

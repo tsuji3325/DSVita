@@ -32,6 +32,38 @@ use std::thread;
 use std::thread::Thread;
 use std::time::{Duration, Instant};
 
+// A timeout is diagnostic only: the worker still owns the prepared buffers.
+// Never let rendering proceed until the completion predicate is true.
+fn wait_for_3d_ready<'a>(
+    condvar: &Condvar,
+    mut ready: std::sync::MutexGuard<'a, bool>,
+    interval: Duration,
+    mut on_timeout: impl FnMut(),
+) -> std::sync::MutexGuard<'a, bool> {
+    while !*ready {
+        let (next, timeout) = condvar.wait_timeout_while(ready, interval, |ready| !*ready).unwrap();
+        ready = next;
+        if timeout.timed_out() && !*ready {
+            on_timeout();
+        }
+    }
+    ready
+}
+
+fn record_3d_wait(event: &str, elapsed_ms: u128) {
+    #[cfg(target_os = "vita")]
+    {
+        use std::io::Write;
+        // Best effort; logging must not panic or overwrite user data.
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("ux0:data/dsvita/transition.log") {
+            let _ = writeln!(file, "transition-sync-v1 {event} elapsed_ms={elapsed_ms}");
+            let _ = file.sync_data();
+        }
+    }
+    #[cfg(not(target_os = "vita"))]
+    eprintln!("transition-sync-v1 {event} elapsed_ms={elapsed_ms}");
+}
+
 pub struct GpuRendererCommon {
     pub mem_buf: GpuMemBuf,
     disp_cap_cnt: [DispCapCnt; 2],
@@ -323,6 +355,7 @@ impl GpuRenderer {
     }
 
     pub fn init(&mut self, stream_top_screen: bool) {
+        record_3d_wait("game_renderer_init", 0);
         self.renderer_regs_2d_shared.init();
         self.renderer_3d.init();
         self.common.mem_buf.init();
@@ -710,15 +743,21 @@ impl GpuRenderer {
             };
 
             if self.rendering_3d {
-                self.rendering_3d = false;
+                let wait_started = Instant::now();
+                let mut reported_delay = false;
                 let processed_3d = self.processed_3d.lock().unwrap();
-                let (_processed_3d, timeout) = self
-                    .processed_3d_condvar
-                    .wait_timeout_while(processed_3d, Duration::from_millis(1000), |processed_3d| !*processed_3d)
-                    .unwrap();
-                if unlikely(timeout.timed_out()) {
-                    info_println!("waiting for 3d processing timed out");
+                let _processed_3d = wait_for_3d_ready(&self.processed_3d_condvar, processed_3d, Duration::from_millis(1000), || {
+                    if !reported_delay {
+                        record_3d_wait("waiting_for_worker", wait_started.elapsed().as_millis());
+                        reported_delay = true;
+                    }
+                });
+                if reported_delay {
+                    record_3d_wait("worker_ready", wait_started.elapsed().as_millis());
                 }
+                // The worker checks this flag before preparing. Keep it true until
+                // it has acknowledged completion, even under long scheduling delays.
+                self.rendering_3d = false;
                 self.renderer_3d.render(&self.common, upscale_3d_factor_index, widescreen, widescreen_coefficient);
             }
 
