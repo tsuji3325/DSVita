@@ -530,6 +530,10 @@ unsafe extern "C" fn fs_clear_overlay_image_hook() {
     OVERLAY_HOOK_INVALIDATED_COUNT.store(0, Ordering::Relaxed);
 
     asm.emu.jit.invalidate_blocks(overlay_info_header.ram_address, overlay_info_header.total_size() as usize);
+    asm.emu
+        .jit
+        .jit_memory_map
+        .clear_exec_counts(overlay_info_header.ram_address, overlay_info_header.total_size() as usize);
 
     let hook_invalidated_pages = OVERLAY_HOOK_INVALIDATED_COUNT.swap(0, Ordering::Relaxed);
     append_overlay_perf_log(
