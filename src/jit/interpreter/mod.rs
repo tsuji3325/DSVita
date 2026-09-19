@@ -50,9 +50,87 @@ use thumb_alu::*;
 use thumb_branch::*;
 use thumb_memory::*;
 
-// Threshold of executions of a cold address before it gets compiled to a jit block.
+// Baseline threshold of executions of a cold address before it gets compiled to a jit block.
 // 255 = always interpret (counter saturates), 0 = always compile. Useful for testing.
+//
+// Adaptive promotion below keeps this conservative baseline for one-shot/cold code, but moves
+// proven loop headers and repeatedly-called function entries closer to the threshold so hot code
+// reaches native execution much sooner without filling the JIT with every boot/path block.
 pub const INTERP_THRESHOLD: u8 = 100;
+
+// Tight backward branches are the clearest hot-code signal we get for free while interpreting.
+// A <=4 KiB loop needs only ~9 more header visits after its first observed back-edge; a larger
+// local loop (<=64 KiB) gets a more conservative ~21 visits. The 0/255 A/B valve semantics are
+// preserved by adaptive_floor().
+const TIGHT_LOOP_SPAN: u32 = 4 * 1024;
+const LOCAL_LOOP_SPAN: u32 = 64 * 1024;
+const TIGHT_LOOP_REMAINING: u8 = 8;
+const LOCAL_LOOP_REMAINING: u8 = 20;
+
+// Function entries are promoted only after the target has already been observed several times.
+// This avoids compiling one-shot init helpers while still cutting a genuinely recurring helper
+// from ~101 interpreted entries to roughly ~37.
+const CALL_PROMOTION_TRIGGER: u8 = 12;
+const CALL_REMAINING: u8 = 24;
+
+#[inline]
+const fn adaptive_floor(remaining: u8) -> u8 {
+    if INTERP_THRESHOLD == 0 || INTERP_THRESHOLD == u8::MAX {
+        0
+    } else {
+        INTERP_THRESHOLD.saturating_sub(remaining)
+    }
+}
+
+#[inline]
+fn promote_exec_count(count_ptr: *mut u8, floor: u8) -> u8 {
+    if floor == 0 || count_ptr.is_null() {
+        return 0;
+    }
+    let count = unsafe { *count_ptr };
+    if count < floor {
+        unsafe { *count_ptr = floor };
+        floor
+    } else {
+        count
+    }
+}
+
+#[inline]
+fn promote_backedge(count_ptr: *mut u8, branch_pc: u32, target_pc: u32) -> u8 {
+    if target_pc > branch_pc {
+        return unsafe { *count_ptr };
+    }
+    let span = branch_pc - target_pc;
+    let floor = if span <= TIGHT_LOOP_SPAN {
+        adaptive_floor(TIGHT_LOOP_REMAINING)
+    } else if span <= LOCAL_LOOP_SPAN {
+        adaptive_floor(LOCAL_LOOP_REMAINING)
+    } else {
+        0
+    };
+    if floor == 0 {
+        unsafe { *count_ptr }
+    } else {
+        promote_exec_count(count_ptr, floor)
+    }
+}
+
+#[inline]
+fn promote_repeated_call(asm: &mut JitAsm, target: u32) {
+    if INTERP_THRESHOLD == 0 || INTERP_THRESHOLD == u8::MAX {
+        return;
+    }
+    let aligned = if target & 1 != 0 { target & !1 } else { target & !3 };
+    let count_ptr = asm.emu.jit.jit_memory_map.get_exec_count(aligned);
+    if count_ptr.is_null() {
+        return;
+    }
+    let count = unsafe { *count_ptr };
+    if count >= CALL_PROMOTION_TRIGGER {
+        promote_exec_count(count_ptr, adaptive_floor(CALL_REMAINING));
+    }
+}
 
 // CPSR flag bits.
 pub(super) const N_BIT: u32 = 1 << 31;
@@ -454,8 +532,17 @@ fn interpret_block_inner<const THUMB: bool>(asm: &mut JitAsm, guest_pc: u32) {
                 // jit entries via the handback below.
                 let count_ptr = asm.emu.jit.jit_memory_map.get_exec_count(aligned);
                 if target & 1 == THUMB as u32 && !count_ptr.is_null() && (cpu == ARM9 || asm.os_irq_handler_addr & 0xFF000000 == regions::SHARED_WRAM_OFFSET) {
-                    let count = unsafe { (*count_ptr).saturating_add(1) };
+                    let mut count = unsafe { (*count_ptr).saturating_add(1) };
                     unsafe { *count_ptr = count };
+
+                    // Back-edges are an inexpensive, high-confidence hotness signal. Promote the
+                    // loop header toward the compile threshold instead of making every tight loop
+                    // spend ~100 iterations in the interpreter. Forward/control-flow branches keep
+                    // the conservative baseline, so one-shot boot code still stays uncompiled.
+                    if aligned <= addr {
+                        count = promote_backedge(count_ptr, addr, aligned);
+                    }
+
                     // The TWL microcode window (0x1FF8xxx) must also hand off: its HLE
                     // substitution only exists in the jit (see emit_code_block_internal).
                     if count <= INTERP_THRESHOLD
@@ -478,6 +565,12 @@ fn interpret_block_inner<const THUMB: bool>(asm: &mut JitAsm, guest_pc: u32) {
                 // interpreting the tail behind the call, like a compiled block would.
                 asm.runtime_data.accumulated_cycles += cycles;
                 unsafe { (*regs).pc = target };
+
+                // A helper that has already been entered repeatedly is no longer cold. Nudge only
+                // its existing hotness counter; branch_reg still performs the normal dispatch and
+                // all HLE/pattern-substitution gates remain centralized in emit_code_block.
+                promote_repeated_call(asm, target);
+
                 unsafe {
                     match (cpu, arm7_hle) {
                         (ARM9, true) => branch_reg::<{ ARM9 }, true, true>(0, target, lr, addr),
