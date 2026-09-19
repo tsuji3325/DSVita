@@ -125,9 +125,14 @@ macro_rules! read_main {
 }
 
 macro_rules! read_wram {
-    ($cpu:expr, $addr:expr, $emu:expr, $shm_offset:ident, $read:block) => {{
-        let $shm_offset = $emu.mem.wram.get_shm_offset::<{ $cpu }>($addr) as u32;
-        $read
+    ($cpu:expr, $addr:expr, $emu:expr, $shm_offset:ident, $read:block, $read_unmapped:block) => {{
+        let wram_shm_offset = $emu.mem.wram.get_shm_offset::<{ $cpu }>($addr);
+        if unlikely(wram_shm_offset == usize::MAX) {
+            $read_unmapped
+        } else {
+            let $shm_offset = wram_shm_offset as u32;
+            $read
+        }
     }};
 }
 
@@ -187,7 +192,11 @@ macro_rules! write_main {
 
 macro_rules! write_wram {
     ($cpu:expr, $addr:expr, $size:expr, $emu:expr, $shm_offset:ident, $write:block) => {{
-        let $shm_offset = $emu.mem.wram.get_shm_offset::<{ $cpu }>($addr) as u32;
+        let wram_shm_offset = $emu.mem.wram.get_shm_offset::<{ $cpu }>($addr);
+        if unlikely(wram_shm_offset == usize::MAX) {
+            return;
+        }
+        let $shm_offset = wram_shm_offset as u32;
         $write;
         if $cpu == ARM7 {
             $emu.jit.invalidate_block($addr, $size);
@@ -245,7 +254,7 @@ impl<const CPU: CpuType, const TCM: bool, T: Convert> MemoryIo<CPU, TCM, T> {
     }
 
     fn read_wram(addr: u32, emu: &mut Emu) -> T {
-        read_wram!(CPU, addr, emu, shm_offset, { utils::read_from_mem(&emu.mem.shm, shm_offset) })
+        read_wram!(CPU, addr, emu, shm_offset, { utils::read_from_mem(&emu.mem.shm, shm_offset) }, { T::from(0) })
     }
 
     fn read_io_ports(addr: u32, emu: &mut Emu) -> T {
@@ -365,9 +374,18 @@ impl<const CPU: CpuType, const TCM: bool, T: Convert> MemoryMultipleSliceIo<CPU,
     }
 
     fn read_wram(addr: u32, slice: &mut [T], emu: &mut Emu) {
-        read_wram!(CPU, addr, emu, shm_offset, {
-            utils::read_from_mem_slice(&emu.mem.shm, shm_offset, slice);
-        });
+        read_wram!(
+            CPU,
+            addr,
+            emu,
+            shm_offset,
+            {
+                utils::read_from_mem_slice(&emu.mem.shm, shm_offset, slice);
+            },
+            {
+                slice.fill(T::from(0));
+            }
+        );
     }
 
     fn read_io_ports(addr: u32, slice: &mut [T], emu: &mut Emu) {
@@ -501,9 +519,18 @@ impl<const CPU: CpuType, const TCM: bool, T: Convert> MemoryFixedSliceIo<CPU, TC
     }
 
     fn read_wram(addr: u32, slice: &mut [T], emu: &mut Emu) {
-        read_wram!(CPU, addr, emu, shm_offset, {
-            slice.fill(utils::read_from_mem(&emu.mem.shm, shm_offset));
-        });
+        read_wram!(
+            CPU,
+            addr,
+            emu,
+            shm_offset,
+            {
+                slice.fill(utils::read_from_mem(&emu.mem.shm, shm_offset));
+            },
+            {
+                slice.fill(T::from(0));
+            }
+        );
     }
 
     fn read_io_ports(addr: u32, slice: &mut [T], emu: &mut Emu) {
