@@ -34,6 +34,11 @@ use crate::logging::debug_println;
 #[cfg(target_arch = "arm")]
 use crate::mmap::ArmContext;
 use crate::mmap::{flush_icache, MemRegion, Mmap, PAGE_SHIFT, PAGE_SIZE};
+use std::sync::atomic::{AtomicU32, Ordering};
+
+pub static OVERLAY_JIT_COMPILE_COUNT: AtomicU32 = AtomicU32::new(0);
+pub static JIT_WRITE_INVALIDATION_COUNT: AtomicU32 = AtomicU32::new(0);
+pub static OVERLAY_HOOK_INVALIDATED_COUNT: AtomicU32 = AtomicU32::new(0);
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn block_hash_log(cpu: CpuType, guest_pc: u32, thumb: bool, code: &[u8]) {
@@ -489,6 +494,10 @@ impl Emu {
                 .iter()
                 .any(|overlay| guest_pc < overlay.ram_address_end() && guest_pc_end > overlay.ram_address);
 
+        if cpu == ARM9 && self.fs_clear_overlay_image_addr != 0 && protect_arm9_main {
+            OVERLAY_JIT_COMPILE_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+
         match cpu {
             ARM9 => match guest_pc & 0xFF000000 {
                 regions::ITCM_OFFSET | regions::ITCM_OFFSET2 => insert!(self.jit.jit_entries.itcm, regions::ITCM_REGION, [ARM9]),
@@ -799,6 +808,7 @@ impl JitMemory {
                 let live_ranges_bit = ($guest_addr >> JIT_LIVE_RANGE_PAGE_SIZE_SHIFT) & 0x7;
                 if unlikely(*live_range & (1 << live_ranges_bit) != 0) {
                     *live_range &= !(1 << live_ranges_bit);
+                    JIT_WRITE_INVALIDATION_COUNT.fetch_add(1, Ordering::Relaxed);
 
                     let guest_addr_start = $guest_addr & !(JIT_LIVE_RANGE_PAGE_SIZE - 1);
                     debug_println!("Invalidating jit {guest_addr_start:x} - {:x}", guest_addr_start + JIT_LIVE_RANGE_PAGE_SIZE);
@@ -819,6 +829,7 @@ impl JitMemory {
             let live_ranges_bit = (addr >> JIT_LIVE_RANGE_PAGE_SIZE_SHIFT) & 0x7;
             if unlikely(*live_range & (1 << live_ranges_bit) != 0) {
                 *live_range &= !(1 << live_ranges_bit);
+                OVERLAY_HOOK_INVALIDATED_COUNT.fetch_add(1, Ordering::Relaxed);
 
                 debug_println!("Invalidating multiple jit {addr:x} - {:x}", addr + JIT_LIVE_RANGE_PAGE_SIZE);
                 self.jit_memory_map.write_jit_entries(addr, JIT_LIVE_RANGE_PAGE_SIZE as usize, DEFAULT_JIT_ENTRY);
