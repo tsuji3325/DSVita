@@ -652,7 +652,29 @@ fn emit_code_block_internal(asm: &mut JitAsm, guest_pc: u32, thumb: bool) {
         );
         let count = unsafe { (*count_ptr).saturating_add(1) };
         unsafe { *count_ptr = count };
-        if count <= crate::jit::interpreter::INTERP_THRESHOLD {
+
+        // Overlay images are frequently replaced at the same ARM9 RAM addresses.
+        // After a reload, many transition-only paths execute briefly and never become
+        // hot enough to justify spending JIT cache space on them. Keep the normal
+        // threshold for static ARM9 code, but require more executions for addresses
+        // that belong to an overlay image. Truly hot overlay code will still compile.
+        let interp_threshold = if asm.cpu == ARM9
+            && asm.emu.fs_clear_overlay_image_addr != 0
+            && asm.emu.nitro_sdk_version.rely_on_fs_invalidation()
+            && asm
+                .emu
+                .cartridge
+                .io
+                .overlays
+                .iter()
+                .any(|overlay| guest_pc >= overlay.ram_address && guest_pc < overlay.ram_address_end())
+        {
+            200
+        } else {
+            crate::jit::interpreter::INTERP_THRESHOLD
+        };
+
+        if count <= interp_threshold {
             crate::jit::interpreter::interpret_block(asm, guest_pc, thumb);
             return;
         }
