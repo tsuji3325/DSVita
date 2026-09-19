@@ -25,7 +25,7 @@ rep(
 )
 rep(
     "let description = CString::new(setting.description).unwrap();",
-    "let description = CString::new(ja_jp::setting_description(setting.description)).unwrap();",
+    'let description = CString::new(ja_jp::setting_description(setting.description).replace("%%", "%")).unwrap();',
 )
 rep(
     "let value = CString::new(setting.value.to_string()).unwrap();",
@@ -61,5 +61,16 @@ for old, new in {
 }.items():
     s = s.replace(old, new)
 
+# The base Latin font is loaded first; merge bundled UI glyphs before any frame.
+rep(
+    "            ImFontAtlas_GetGlyphRangesDefault((*ImGui::GetIO()).Fonts),\n        );",
+    "            ImFontAtlas_GetGlyphRangesDefault((*ImGui::GetIO()).Fonts),\n        );\n        ja_jp::init_font();",
+)
+# Translations contain literal percent signs, never printf directives.
+rep(
+    "ImGui::TextDisabled(description.as_ptr() as _);",
+    'ImGui::TextDisabled(c"%s".as_ptr(), description.as_ptr());',
+)
 p.write_text(s, encoding="utf-8")
 print("Japanese UI patch applied")
+
