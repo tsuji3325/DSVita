@@ -39,6 +39,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 pub static OVERLAY_JIT_COMPILE_COUNT: AtomicU32 = AtomicU32::new(0);
 pub static JIT_WRITE_INVALIDATION_COUNT: AtomicU32 = AtomicU32::new(0);
 pub static OVERLAY_HOOK_INVALIDATED_COUNT: AtomicU32 = AtomicU32::new(0);
+pub static JIT_ARM9_ALLOCATED_BYTES: AtomicU32 = AtomicU32::new(0);
+pub static JIT_ARM9_CACHE_RESET_COUNT: AtomicU32 = AtomicU32::new(0);
+pub static JIT_ARM9_CACHE_FREED_BLOCKS: AtomicU32 = AtomicU32::new(0);
+pub static JIT_ARM9_CACHE_FREED_BYTES: AtomicU32 = AtomicU32::new(0);
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn block_hash_log(cpu: CpuType, guest_pc: u32, thumb: bool, code: &[u8]) {
@@ -699,6 +703,7 @@ impl JitMemory {
     fn reset_blocks(&mut self, cpu_type: CpuType) {
         self.jit_perf_map_record.reset();
 
+        let mut freed_blocks = 1u32;
         let block_metadata = self.get_jit_data(cpu_type).jit_funcs.pop_front().unwrap();
         self.jit_memory_map
             .write_jit_entries(block_metadata.guest_pc, (block_metadata.guest_pc_end - block_metadata.guest_pc) as usize, DEFAULT_JIT_ENTRY);
@@ -735,11 +740,18 @@ impl JitMemory {
 
             freed_end = addr_offset_end;
             self.get_jit_data(cpu_type).jit_funcs.pop_front().unwrap();
+            freed_blocks += 1;
         }
 
         let jit_data = self.get_jit_data(cpu_type);
         jit_data.start = (freed_start as usize) << PAGE_SHIFT;
         jit_data.end = (freed_end as usize) << PAGE_SHIFT;
+
+        if cpu_type == ARM9 {
+            JIT_ARM9_CACHE_RESET_COUNT.fetch_add(1, Ordering::Relaxed);
+            JIT_ARM9_CACHE_FREED_BLOCKS.fetch_add(freed_blocks, Ordering::Relaxed);
+            JIT_ARM9_CACHE_FREED_BYTES.fetch_add((jit_data.end - jit_data.start) as u32, Ordering::Relaxed);
+        }
 
         debug_println!("{cpu_type:?} Jit memory reset from {:x} - {:x}", jit_data.start, jit_data.end);
     }
@@ -763,6 +775,9 @@ impl JitMemory {
         let jit_data = self.get_jit_data(cpu_type);
         let addr = jit_data.start;
         jit_data.start += required_size;
+        if cpu_type == ARM9 {
+            JIT_ARM9_ALLOCATED_BYTES.fetch_add(required_size as u32, Ordering::Relaxed);
+        }
         (addr, flushed)
     }
 
