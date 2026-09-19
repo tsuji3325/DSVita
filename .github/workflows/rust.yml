@@ -28,7 +28,7 @@ jobs:
           submodules: recursive
 
       - name: Apply Japanese UI
-        if: github.ref_name == 'japanese-ui' || github.ref_name == 'japanese-font-fix' || github.ref_name == 'jit-pc-end-fix' || github.ref_name == 'overlay-invalidation-test' || github.ref_name == 'overlay-range-invalidation' || github.ref_name == 'overlay-perf-diagnostic' || github.ref_name == 'wram-unmapped-fix' || github.ref_name == 'jit-churn-diagnostic'
+        if: github.ref_name == 'japanese-ui' || github.ref_name == 'japanese-font-fix' || github.ref_name == 'jit-pc-end-fix' || github.ref_name == 'overlay-invalidation-test' || github.ref_name == 'overlay-range-invalidation' || github.ref_name == 'overlay-perf-diagnostic' || github.ref_name == 'wram-unmapped-fix' || github.ref_name == 'jit-churn-diagnostic' || github.ref_name == 'overlay-hotness-reset-test'
         run: python3 tools/apply_japanese_ui.py
 
       - name: Install clang 21
