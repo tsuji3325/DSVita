@@ -873,6 +873,11 @@ impl<'a> JitAsm<'a> {
         let pc_step = if thumb { 2 } else { 4 };
 
         let mut min_imm_guest_addr = u32::MAX;
+        // Keep the end address tied to the last instruction actually accepted into
+        // the block. If decoding stops on an unknown/NV instruction, pc_offset has
+        // already advanced to that excluded instruction and must not extend the JIT
+        // entry range by one instruction.
+        let mut last_valid_pc = guest_pc;
         loop {
             let pc = guest_pc + pc_offset;
             let inst_info = get_inst_info(cpu, emu, pc);
@@ -906,6 +911,7 @@ impl<'a> JitAsm<'a> {
             let is_skip_one_branch = is_unreturnable_branch && inst_info.op.is_labelled_branch() && inst_info.operands()[0].as_imm() == Some(0);
             let op = inst_info.op;
             insts.push(inst_info);
+            last_valid_pc = pc;
 
             if (matches!(op, Op::Bx | Op::BxRegT) && cond == Cond::AL)
                 || (insts.len() >= 500 && op != Op::BlSetupT)
@@ -920,7 +926,7 @@ impl<'a> JitAsm<'a> {
             pc_offset += pc_step;
         }
 
-        guest_pc + pc_offset
+        last_valid_pc
     }
 }
 
