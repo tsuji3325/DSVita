@@ -8,7 +8,7 @@ use crate::jit::inst_branch_handler::check_scheduler;
 use crate::jit::inst_info::InstInfo;
 use crate::jit::jit_asm::JitAsm;
 use crate::jit::jit_asm_common_funs::exit_guest_context;
-use crate::jit::jit_memory::JitEntry;
+use crate::jit::jit_memory::{JitEntry, JIT_WRITE_INVALIDATION_COUNT, OVERLAY_HOOK_INVALIDATED_COUNT, OVERLAY_JIT_COMPILE_COUNT};
 use crate::jit::op::Op;
 use crate::jit::reg::Reg;
 use crate::logging::{debug_println, info_println};
@@ -17,6 +17,7 @@ use crate::{cartridge_io, get_jit_asm_ptr, IS_DEBUG};
 use std::cmp::min;
 use std::intrinsics::{likely, unlikely};
 use std::mem::MaybeUninit;
+use std::sync::atomic::Ordering;
 use std::{mem, slice};
 use CpuType::ARM7;
 
@@ -457,6 +458,23 @@ unsafe extern "C" fn hle_os_irqhandler(guest_pc: u32) {
     jit_entry(irq_func);
 }
 
+#[cfg(target_os = "vita")]
+fn append_overlay_perf_log(id: u32, ram_address: u32, total_size: u32, compiled_since_prev: u32, write_invalidations: u32, hook_invalidated_pages: u32) {
+    use std::io::Write;
+
+    let _ = std::fs::create_dir_all("ux0:data/dsvita");
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("ux0:data/dsvita/overlay_perf.log") {
+        let _ = writeln!(
+            file,
+            "overlay id={} addr={:08x} size={} compiled_since_prev={} write_invalidations={} hook_invalidated_pages={}",
+            id, ram_address, total_size, compiled_since_prev, write_invalidations, hook_invalidated_pages
+        );
+    }
+}
+
+#[cfg(not(target_os = "vita"))]
+fn append_overlay_perf_log(_id: u32, _ram_address: u32, _total_size: u32, _compiled_since_prev: u32, _write_invalidations: u32, _hook_invalidated_pages: u32) {}
+
 unsafe extern "C" fn fs_clear_overlay_image_hook() {
     let asm = get_jit_asm_ptr::<{ ARM9 }>().as_mut_unchecked();
     let regs = ARM9.thread_regs();
@@ -468,7 +486,22 @@ unsafe extern "C" fn fs_clear_overlay_image_hook() {
     debug_assert_ne!(shm_offset, 0);
 
     let overlay_info_header: &cartridge_io::FsOverlayInfoHeader = mem::transmute(asm.emu.mem.shm.as_ptr().add(shm_offset));
+
+    let compiled_since_prev = OVERLAY_JIT_COMPILE_COUNT.swap(0, Ordering::Relaxed);
+    let write_invalidations = JIT_WRITE_INVALIDATION_COUNT.swap(0, Ordering::Relaxed);
+    OVERLAY_HOOK_INVALIDATED_COUNT.store(0, Ordering::Relaxed);
+
     asm.emu.jit.invalidate_blocks(overlay_info_header.ram_address, overlay_info_header.total_size() as usize);
+
+    let hook_invalidated_pages = OVERLAY_HOOK_INVALIDATED_COUNT.swap(0, Ordering::Relaxed);
+    append_overlay_perf_log(
+        overlay_info_header.id,
+        overlay_info_header.ram_address,
+        overlay_info_header.total_size(),
+        compiled_since_prev,
+        write_invalidations,
+        hook_invalidated_pages,
+    );
 }
 
 unsafe extern "C" fn hle_microcode_shakehand(guest_pc: u32) {
