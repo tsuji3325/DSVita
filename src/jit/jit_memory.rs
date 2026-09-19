@@ -474,15 +474,30 @@ impl Emu {
             }};
         }
 
+        // Once the NitroSDK overlay-clear hook has been found, only keep the
+        // generic write-protect backstop for code that actually lives in an ARM9
+        // overlay range. This preserves the transition-stability fix without trapping
+        // ordinary writes that share pages with the static ARM9 image. If overlay
+        // metadata is unavailable, stay on the safe side and protect all main blocks.
+        let protect_arm9_main = self.fs_clear_overlay_image_addr == 0
+            || !self.nitro_sdk_version.rely_on_fs_invalidation()
+            || self.cartridge.io.overlays.is_empty()
+            || self
+                .cartridge
+                .io
+                .overlays
+                .iter()
+                .any(|overlay| guest_pc < overlay.ram_address_end() && guest_pc_end > overlay.ram_address);
+
         match cpu {
             ARM9 => match guest_pc & 0xFF000000 {
                 regions::ITCM_OFFSET | regions::ITCM_OFFSET2 => insert!(self.jit.jit_entries.itcm, regions::ITCM_REGION, [ARM9]),
                 regions::MAIN_OFFSET => {
-                    // Keep generic write-protect invalidation active even after the
-                    // NitroSDK FSi_ClearOverlayImage hook is found. The hook remains in
-                    // place, but writes into ARM9 main memory also invalidate stale JIT
-                    // entries as a correctness backstop during overlay transitions.
-                    insert!(self.jit.jit_entries.main, regions::MAIN_REGION, [ARM9, ARM7])
+                    if protect_arm9_main {
+                        insert!(self.jit.jit_entries.main, regions::MAIN_REGION, [ARM9, ARM7])
+                    } else {
+                        insert!(self.jit.jit_entries.main)
+                    }
                 }
                 regions::VRAM_OFFSET => insert!(self.jit.jit_entries.vram),
                 _ => todo!("{:x}", guest_pc),
