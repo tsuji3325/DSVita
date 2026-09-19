@@ -459,21 +459,21 @@ unsafe extern "C" fn hle_os_irqhandler(guest_pc: u32) {
 }
 
 #[cfg(target_os = "vita")]
-fn append_overlay_perf_log(id: u32, ram_address: u32, total_size: u32, compiled_since_prev: u32, write_invalidations: u32, hook_invalidated_pages: u32) {
+fn append_overlay_perf_log(id: u32, ram_address: u32, total_size: u32, compiled_since_prev: u32, write_invalidations: u32, hook_invalidated_pages: u32, restored_write_pages: u32) {
     use std::io::Write;
 
     let _ = std::fs::create_dir_all("ux0:data/dsvita");
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("ux0:data/dsvita/overlay_perf.log") {
         let _ = writeln!(
             file,
-            "overlay id={} addr={:08x} size={} compiled_since_prev={} write_invalidations={} hook_invalidated_pages={}",
-            id, ram_address, total_size, compiled_since_prev, write_invalidations, hook_invalidated_pages
+            "overlay id={} addr={:08x} size={} compiled_since_prev={} write_invalidations={} hook_invalidated_pages={} restored_write_pages={}",
+            id, ram_address, total_size, compiled_since_prev, write_invalidations, hook_invalidated_pages, restored_write_pages
         );
     }
 }
 
 #[cfg(not(target_os = "vita"))]
-fn append_overlay_perf_log(_id: u32, _ram_address: u32, _total_size: u32, _compiled_since_prev: u32, _write_invalidations: u32, _hook_invalidated_pages: u32) {}
+fn append_overlay_perf_log(_id: u32, _ram_address: u32, _total_size: u32, _compiled_since_prev: u32, _write_invalidations: u32, _hook_invalidated_pages: u32, _restored_write_pages: u32) {}
 
 unsafe extern "C" fn fs_clear_overlay_image_hook() {
     let asm = get_jit_asm_ptr::<{ ARM9 }>().as_mut_unchecked();
@@ -494,6 +494,9 @@ unsafe extern "C" fn fs_clear_overlay_image_hook() {
     asm.emu.jit.invalidate_blocks(overlay_info_header.ram_address, overlay_info_header.total_size() as usize);
 
     let hook_invalidated_pages = OVERLAY_HOOK_INVALIDATED_COUNT.swap(0, Ordering::Relaxed);
+    let restored_write_pages = asm
+        .emu
+        .mmu_restore_arm9_main_write_range_if_no_jit(overlay_info_header.ram_address, overlay_info_header.total_size() as usize);
     append_overlay_perf_log(
         overlay_info_header.id,
         overlay_info_header.ram_address,
@@ -501,6 +504,7 @@ unsafe extern "C" fn fs_clear_overlay_image_hook() {
         compiled_since_prev,
         write_invalidations,
         hook_invalidated_pages,
+        restored_write_pages,
     );
 }
 
