@@ -122,6 +122,34 @@ impl JitMemoryMap {
         unsafe { block.add((addr as usize) & (BLOCK_SIZE - 1)) }
     }
 
+    /// Reset the cold-interpreter hotness counters for a guest address range.
+    ///
+    /// Overlay images can reuse the same ARM9 RAM addresses for completely
+    /// different code. Keeping the old counters makes freshly-loaded code look
+    /// artificially hot and triggers immediate mass JIT recompilation.
+    pub fn clear_exec_counts(&mut self, addr: u32, size: usize) {
+        if size == 0 {
+            return;
+        }
+
+        let mut addr = (addr & 0x0FFFFFFF) >> 1;
+        let mut size = (size + 1) >> 1;
+
+        while size > 0 {
+            let block = self.exec_counts_map[(addr >> BLOCK_SHIFT) as usize] as *mut u8;
+            let block_offset = (addr as usize) & (BLOCK_SIZE - 1);
+            let block_remaining = BLOCK_SIZE - block_offset;
+            let write_size = min(block_remaining, size);
+
+            if !block.is_null() {
+                unsafe { slice::from_raw_parts_mut(block.add(block_offset), write_size).fill(0) };
+            }
+
+            addr = utils::align_up(addr as usize, BLOCK_SIZE) as u32;
+            size -= write_size;
+        }
+    }
+
     pub fn get_live_range(&self, addr: u32) -> *mut u8 {
         unsafe { (*self.live_ranges_map.get_unchecked((addr >> (JIT_LIVE_RANGE_PAGE_SIZE_SHIFT + 3)) as usize)) as _ }
     }
