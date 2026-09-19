@@ -421,4 +421,61 @@ impl Emu {
             ARM7 => remove_mmu_write_entry(addr, region, self.mem.mmu_arm7.mmu_write.as_mut(), Some(&mut self.mem.mmu_arm7.vmem)),
         }
     }
+
+    /// Restore the ARM9 main-RAM write fast path after an overlay invalidation, but
+    /// only for 4 KiB MMU pages that no longer contain any live JIT range.
+    ///
+    /// JIT invalidation is tracked in 256-byte chunks while write protection is
+    /// page-granular, so restoring a page that still contains another live block
+    /// would allow self-modifying code to bypass invalidation. ITCM/DTCM-covered
+    /// pages are deliberately skipped here; this helper is only the main-RAM
+    /// overlay fast-path backstop.
+    pub fn mmu_restore_arm9_main_write_range_if_no_jit(&mut self, start: u32, size: usize) -> u32 {
+        if size == 0 {
+            return 0;
+        }
+
+        let begin = start & !((MMU_PAGE_SIZE as u32) - 1);
+        let end_unaligned = start.saturating_add(size as u32);
+        let end = end_unaligned.saturating_add((MMU_PAGE_SIZE as u32) - 1) & !((MMU_PAGE_SIZE as u32) - 1);
+        let mut restored = 0;
+
+        for addr in (begin..end).step_by(MMU_PAGE_SIZE) {
+            if addr & 0x0F000000 != MAIN_OFFSET {
+                continue;
+            }
+
+            // The TCM-aware ARM9 map may overlay main RAM. Leave those pages to
+            // the existing TCM mapper rather than forcing a main-RAM mapping.
+            if addr < self.cp15.itcm_size
+                || (addr >= self.cp15.dtcm_addr && addr < self.cp15.dtcm_addr.saturating_add(self.cp15.dtcm_size))
+            {
+                continue;
+            }
+
+            let mut has_live_jit = false;
+            for offset in (0..MMU_PAGE_SIZE).step_by(crate::jit::jit_memory::JIT_LIVE_RANGE_PAGE_SIZE as usize) {
+                if self.jit.jit_memory_map.has_jit_block(addr + offset as u32) {
+                    has_live_jit = true;
+                    break;
+                }
+            }
+            if has_live_jit {
+                continue;
+            }
+
+            let page = (addr as usize) >> MMU_PAGE_SHIFT;
+            let addr_offset = (addr as usize) & (MAIN_REGION.size - 1);
+            let shm_offset = MAIN_REGION.shm_offset + addr_offset;
+            self.mem.mmu_arm9.mmu_write[page] = shm_offset;
+            self.mem.mmu_arm9.mmu_write_tcm[page] = shm_offset;
+            self.mem
+                .mmu_arm9
+                .vmem_tcm
+                .set_region_protection(addr as usize, MMU_PAGE_SIZE, &MAIN_REGION, true, true, false);
+            restored += 1;
+        }
+
+        restored
+    }
 }
