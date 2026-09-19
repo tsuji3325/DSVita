@@ -1,6 +1,7 @@
 use crate::core::graphics::gpu_3d::registers_3d::TextureFormat;
 use crate::core::graphics::gpu_3d::renderer_3d::Gpu3DDraw;
 use crate::core::graphics::gpu_mem_buf::{GpuMemBuf, GpuMemRefs};
+use crate::bitset::Bitset;
 use crate::core::memory::vram;
 use crate::core::memory::vram::Vram;
 use crate::utils;
@@ -63,6 +64,9 @@ pub struct Texture3D {
     pal_hash: u32,
     in_use: bool,
     dirty: bool,
+    // Physical VRAM dirty sections that can affect this decoded texture under the mapping
+    // captured when it was created. Used by Texture3DCache's reverse dirty index.
+    source_sections: Bitset<6>,
     pub texture_id: GLuint,
 }
 
@@ -432,8 +436,10 @@ impl Texture3D {
             pal_hash: 0,
             in_use: true,
             dirty: false,
+            source_sections: Bitset::new(),
             texture_id: u32::MAX,
         };
+        instance.source_sections = instance.calculate_source_sections(vram);
         instance.tex_hash = instance.calculate_tex_hash(mem_refs);
         if metadata.format() != TextureFormat::Direct {
             instance.pal_hash = instance.calculate_pal_hash(mem_refs);
@@ -543,6 +549,27 @@ impl Texture3D {
         // file.write_all_at(slice::from_raw_parts(self.data.as_ptr() as _, self.data.len() * 4), header.len() as u64).unwrap();
     }
 
+    fn calculate_source_sections(&self, vram: &Vram) -> Bitset<6> {
+        let mut sections = Bitset::new();
+        let (vram_addr, vram_addr_end) = self.get_tex_vram_range();
+        vram.maps.add_tex_rear_plane_img_sections(vram_addr, vram_addr_end, &mut sections);
+
+        if self.metadata.format() == TextureFormat::Texel4x4Compressed {
+            let mut slot1_addr = 0x20000 + ((vram_addr & 0x1FFFF) >> 1);
+            if vram_addr >> 17 == 2 {
+                slot1_addr += 0x10000;
+            }
+            let slot1_addr_end = slot1_addr + (self.metadata.size() >> 3);
+            vram.maps.add_tex_rear_plane_img_sections(slot1_addr, slot1_addr_end, &mut sections);
+        }
+
+        if self.metadata.format() != TextureFormat::Direct {
+            let (pal_addr, pal_addr_end) = self.get_pal_range();
+            vram.maps.add_tex_palette_sections(pal_addr, pal_addr_end, &mut sections);
+        }
+
+        sections
+    }
     fn is_dirty(&self, mem_buf: &GpuMemBuf, mem_refs: &GpuMemRefs) -> bool {
         let (vram_addr, vram_addr_end) = self.get_tex_vram_range();
 
@@ -588,8 +615,16 @@ impl Texture3D {
 
 const CACHE_SIZE_LIMIT: u32 = 16 * 1024 * 1024;
 
+const DIRTY_SECTION_SLOTS: usize = 6 * 32;
+
 pub struct Texture3DCache {
     cache: HashMap<u64, Box<Texture3D>, utils::BuildNoHasher64>,
+    // Reverse index: physical 4 KiB VRAM dirty section -> cached texture keys.
+    // This turns the common per-frame path from scanning the whole texture cache into
+    // checking only textures that overlap sections the guest actually wrote.
+    section_keys: Vec<Vec<u64>>,
+    last_tex_rear_plane_img_banks: [u8; 4],
+    last_tex_palette_banks: [u8; 6],
     total_size: u32,
 }
 
@@ -597,6 +632,9 @@ impl Texture3DCache {
     pub fn new() -> Self {
         Texture3DCache {
             cache: HashMap::default(),
+            section_keys: (0..DIRTY_SECTION_SLOTS).map(|_| Vec::new()).collect(),
+            last_tex_rear_plane_img_banks: [u8::MAX; 4],
+            last_tex_palette_banks: [u8::MAX; 6],
             total_size: 0,
         }
     }
@@ -610,13 +648,98 @@ impl Texture3DCache {
             }
         }
         self.cache.clear();
+        self.total_size = 0;
+        for keys in &mut self.section_keys {
+            keys.clear();
+        }
+    }
+
+    #[inline]
+    fn register_sections(&mut self, key: u64, sections: Bitset<6>) {
+        for section in 0..DIRTY_SECTION_SLOTS {
+            if sections.contains(section) {
+                self.section_keys[section].push(key);
+            }
+        }
+    }
+
+    #[inline]
+    fn unregister_sections(&mut self, key: u64, sections: Bitset<6>) {
+        for section in 0..DIRTY_SECTION_SLOTS {
+            if !sections.contains(section) {
+                continue;
+            }
+            let keys = &mut self.section_keys[section];
+            if let Some(pos) = keys.iter().position(|&candidate| candidate == key) {
+                keys.swap_remove(pos);
+            }
+        }
     }
 
     pub fn mark_dirty(&mut self, mem_buf: &GpuMemBuf, mem_refs: &GpuMemRefs) {
-        for texture_3d in self.cache.values_mut() {
-            if !texture_3d.dirty && texture_3d.is_dirty(mem_buf, mem_refs) {
-                texture_3d.dirty = true;
+        let current_img_banks = mem_buf.vram.maps.tex_rear_plane_img_banks;
+        let current_pal_banks = mem_buf.vram.maps.tex_palette_banks;
+        let mappings_changed = current_img_banks != self.last_tex_rear_plane_img_banks
+            || current_pal_banks != self.last_tex_palette_banks;
+
+        self.last_tex_rear_plane_img_banks = current_img_banks;
+        self.last_tex_palette_banks = current_pal_banks;
+
+        if self.cache.is_empty() {
+            return;
+        }
+
+        let mut newly_dirty: Vec<(u64, Bitset<6>)> = Vec::new();
+
+        if mappings_changed {
+            // Rebuild the reverse index on every remap, including when the new
+            // bank has identical bytes and the decoded texture remains valid.
+            // Otherwise later writes to that new bank would never nominate it.
+            for keys in &mut self.section_keys {
+                keys.clear();
             }
+            for (&key, texture_3d) in self.cache.iter_mut() {
+                if texture_3d.dirty {
+                    continue;
+                }
+                if texture_3d.is_dirty(mem_buf, mem_refs) {
+                    texture_3d.dirty = true;
+                } else {
+                    texture_3d.source_sections = texture_3d.calculate_source_sections(&mem_buf.vram);
+                    for section in 0..DIRTY_SECTION_SLOTS {
+                        if texture_3d.source_sections.contains(section) {
+                            self.section_keys[section].push(key);
+                        }
+                    }
+                }
+            }
+        } else if !mem_buf.vram_banks.dirty_sections.is_empty() {
+            // Common path: collect only textures that reference a physical section dirtied
+            // since the previous GPU read. A key can span several dirty sections, so dedupe
+            // before doing the more expensive mapping/hash validation.
+            let mut candidates = Vec::new();
+            for section in 0..DIRTY_SECTION_SLOTS {
+                if mem_buf.vram_banks.dirty_sections.contains(section) {
+                    candidates.extend_from_slice(&self.section_keys[section]);
+                }
+            }
+            candidates.sort_unstable();
+            candidates.dedup();
+
+            for key in candidates {
+                if let Some(texture_3d) = self.cache.get_mut(&key) {
+                    if !texture_3d.dirty && texture_3d.is_dirty(mem_buf, mem_refs) {
+                        texture_3d.dirty = true;
+                        newly_dirty.push((key, texture_3d.source_sections));
+                    }
+                }
+            }
+        }
+
+        // Dirty entries no longer need to participate in subsequent frame candidate scans;
+        // they are replaced lazily the next time the game actually draws them.
+        for (key, sections) in newly_dirty {
+            self.unregister_sections(key, sections);
         }
     }
 
@@ -628,11 +751,13 @@ impl Texture3DCache {
                 texture_3d.in_use = true;
                 return unsafe { mem::transmute(texture_3d.as_mut()) };
             } else {
+                let source_sections = texture_3d.source_sections;
                 self.total_size -= texture_3d.metadata.size();
                 if texture_3d.texture_id != u32::MAX {
                     texture_ids_to_delete.push(texture_3d.texture_id);
                 }
                 self.cache.remove(&key);
+                self.unregister_sections(key, source_sections);
             }
         }
 
@@ -651,10 +776,16 @@ impl Texture3DCache {
             }
             debug_assert_ne!(oldest_size, 0);
             self.total_size -= oldest_size;
-            unsafe { self.cache.remove(&oldest_key).unwrap_unchecked() };
+            let removed = unsafe { self.cache.remove(&oldest_key).unwrap_unchecked() };
+            self.unregister_sections(oldest_key, removed.source_sections);
+            if removed.texture_id != u32::MAX {
+                texture_ids_to_delete.push(removed.texture_id);
+            }
         }
+        let source_sections = texture_3d.source_sections;
         self.total_size += texture_3d.metadata.size();
         self.cache.insert(key, Box::new(texture_3d));
+        self.register_sections(key, source_sections);
         unsafe { self.cache.get_mut(&key).unwrap_unchecked().as_mut() }
     }
 

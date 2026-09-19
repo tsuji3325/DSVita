@@ -27,8 +27,11 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Test texture dirty index
+        run: python3 tools/test_texture_dirty_index.py
+
       - name: Apply Japanese UI
-        if: github.ref_name == 'japanese-ui' || github.ref_name == 'japanese-font-fix' || github.ref_name == 'validation-stage-01'
+        if: github.ref_name == 'japanese-ui' || github.ref_name == 'japanese-font-fix' || github.ref_name == 'validation-stage-01' || github.ref_name == 'validation-stage-02'
         run: python3 tools/apply_japanese_ui.py
 
       - name: Install clang 21

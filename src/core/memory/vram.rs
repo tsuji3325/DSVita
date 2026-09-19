@@ -436,6 +436,37 @@ impl VramMaps {
         }
     }
 
+    pub fn add_tex_rear_plane_img_sections(&self, start: u32, end: u32, sections: &mut Bitset<6>) {
+        if start >= end {
+            return;
+        }
+        let start = start & !(BANK_SECTION_SIZE as u32 - 1);
+        let end = (end - 1) & !(BANK_SECTION_SIZE as u32 - 1);
+        for addr in (start..(end + BANK_SECTION_SIZE as u32)).step_by(BANK_SECTION_SIZE) {
+            let bank_index = addr >> 17;
+            let bank_map = self.tex_rear_plane_img[bank_index as usize];
+            if !bank_map.is_null() {
+                let offset = addr & ((1 << 17) - 1);
+                *sections += (bank_map.offset + offset as usize) >> BANK_SECTION_SHIFT;
+            }
+        }
+    }
+
+    pub fn add_tex_palette_sections(&self, start: u32, end: u32, sections: &mut Bitset<6>) {
+        if start >= end {
+            return;
+        }
+        let start = start & !(BANK_SECTION_SIZE as u32 - 1);
+        let end = (end - 1) & !(BANK_SECTION_SIZE as u32 - 1);
+        for addr in (start..(end + BANK_SECTION_SIZE as u32)).step_by(BANK_SECTION_SIZE) {
+            let bank_index = addr >> 14;
+            let bank_map = self.tex_palette[bank_index as usize];
+            if !bank_map.is_null() {
+                let offset = addr & ((1 << 14) - 1);
+                *sections += (bank_map.offset + offset as usize) >> BANK_SECTION_SHIFT;
+            }
+        }
+    }
     pub fn is_tex_rear_plane_img_dirty(&self, start: u32, end: u32, other: &[u8; 4], dirty_sections: &Bitset<6>) -> bool {
         let start_index = start >> 17;
         let end_index = (end - 1) >> 17;
