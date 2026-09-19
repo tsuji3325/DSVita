@@ -31,7 +31,7 @@ jobs:
         run: python3 tools/test_3d_wait.py
 
       - name: Apply Japanese UI
-        if: github.ref_name == 'japanese-ui' || github.ref_name == 'japanese-font-fix' || github.ref_name == 'transition-sync-fix'
+        if: github.ref_name == 'japanese-ui' || github.ref_name == 'japanese-font-fix' || github.ref_name == 'transition-sync-fix' || github.ref_name == 'jit-stale-entry-guard'
         run: python3 tools/apply_japanese_ui.py
 
       - name: Install clang 21

@@ -15,6 +15,8 @@ use crate::jit::emitter::map_fun_cpu;
 use crate::jit::inst_branch_handler::call_jit_fun;
 use crate::jit::inst_info::InstInfo;
 use crate::jit::jit_asm_common_funs::exit_guest_context;
+#[cfg(target_arch = "arm")]
+use crate::jit::jit_memory::DEFAULT_JIT_ENTRY;
 use crate::jit::op::Op;
 use crate::jit::reg::Reg;
 use crate::jit::reg::{reg_reserve, RegReserve};
@@ -490,6 +492,39 @@ const fn pre_cycle_count_sum_offset() -> usize {
 }
 
 #[cfg(target_arch = "arm")]
+#[cold]
+unsafe extern "C" fn recover_stale_jit_entry<const CPU: CpuType>() {
+    let guest_pc = {
+        let asm = get_jit_asm_ptr::<CPU>().as_mut_unchecked();
+        let mut guest_pc = CPU.thread_regs().pc;
+        if asm.emu.thread_is_thumb(CPU) {
+            guest_pc |= 1;
+        } else {
+            guest_pc &= !1;
+        }
+
+        // A block entry outside its compiled guest range means the guest->jit slot is
+        // stale (typically after a recycled jit page). Clear only that slot and route
+        // through the normal cold/compile dispatcher instead of indexing past the
+        // GuestInstOffset restore table.
+        *asm.emu.jit.jit_memory_map.get_jit_entry(guest_pc) = DEFAULT_JIT_ENTRY;
+
+        #[cfg(target_os = "vita")]
+        {
+            use std::io::Write;
+            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("ux0:data/dsvita/transition.log") {
+                let _ = writeln!(file, "jit-entry-guard-v1 cpu={CPU:?} guest_pc={guest_pc:08x}");
+                let _ = file.sync_data();
+            }
+        }
+
+        guest_pc
+    };
+
+    emit_code_block(guest_pc);
+}
+
+#[cfg(target_arch = "arm")]
 #[unsafe(naked)]
 unsafe extern "C" fn jump_to_other_guest_pc<const CPU: CpuType>(_: u32, _: u32) {
     #[rustfmt::skip]
@@ -500,15 +535,21 @@ unsafe extern "C" fn jump_to_other_guest_pc<const CPU: CpuType>(_: u32, _: u32) 
         "ldr r2, [r1, {emu_offset}]", // r2 = asm.emu
         "mov r4, {jit_mem_mmap_offset}",
         "ldr r3, [r2, r4]", // r3 = r2.jit.mem.ptr
-        "add r0, r0, r0, lsl #2",
         "sub r3, lr, r3", // r3 = lr - r3
         "mov r5, {jit_guest_inst_offset}",
         "lsrs r3, {page_shift}", // r3 = r3 >> PAGE_SHIFT
         "ldr r4, [r2, r5]", // r4 = &r2.jit.guest_inst_offsets
         "add r3, r3, r3, lsl #1",
         "add r4, r4, r3, lsl #2",
+        // Vec layout is already relied upon below (data ptr at +4); on this 32-bit
+        // target len is the third word at +8. Reject one-past-end/stale entries before
+        // the ldmia turns arbitrary memory into host register restore pointers.
+        "ldr r12, [r4, 8]",
+        "cmp r0, r12",
+        "bhs 1f",
+        "add r0, r0, r0, lsl #2",
         "mov r3, {guest_regs_offset}",
-        "ldr r5, [r4, 4]", // r5 = r4[r3], offset by 4, first 4 bytes of vec is capacity
+        "ldr r5, [r4, 4]", // Vec data ptr; first word is capacity
         "add r5, r5, r0, lsl #3",
         "ldmia r5, {{r2, r4, r5, r6, r7, r8, r9, r10, r11}}",
         "ldr r0, [r3, {cpsr_offset}]",
@@ -525,6 +566,13 @@ unsafe extern "C" fn jump_to_other_guest_pc<const CPU: CpuType>(_: u32, _: u32) 
         "ldr r10, [r10]",
         "ldr r11, [r11]",
         "bx lr",
+        "1:",
+        // The current JIT block prologue owns this frame. Undo it before tail-routing
+        // to the normal dispatcher so the fallback has exactly the same stack shape as
+        // a regular external branch into DEFAULT_JIT_ENTRY.
+        "add sp, sp, 4",
+        "pop {{r4-r11,lr}}",
+        "b {recover_stale_jit_entry}",
         jit_asm_ptr = const CPU.jit_asm_addr(),
         emu_offset = const jit_emu_offset(),
         jit_mem_mmap_offset = const jit_mem_mmap_offset(),
@@ -533,6 +581,7 @@ unsafe extern "C" fn jump_to_other_guest_pc<const CPU: CpuType>(_: u32, _: u32) 
         pre_cycle_count_sum_offset = const pre_cycle_count_sum_offset(),
         guest_regs_offset = const CPU.guest_regs_addr(),
         cpsr_offset = const Reg::CPSR as usize * 4,
+        recover_stale_jit_entry = sym recover_stale_jit_entry::<CPU>,
     );
 }
 
