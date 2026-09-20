@@ -124,11 +124,8 @@ impl GpuMemBuf {
 
         if read_lcdc {
             let start = Instant::now();
-            if mapping_changed || !self.lcdc_read_valid {
-                self.vram.maps.read_all_lcdc(&mut refs.lcdc, &self.vram_banks.mem);
-            } else {
-                partial_copied_bytes += self.vram.maps.read_dirty_lcdc(&mut refs.lcdc, &self.vram_banks.mem, &dirty_sections);
-            }
+            // Safety test: LCDC follows the original full-refresh path.
+            self.vram.maps.read_all_lcdc(&mut refs.lcdc, &self.vram_banks.mem);
             self.lcdc_read_valid = true;
             VRAM_READ_LCDC_US.fetch_add(start.elapsed().as_micros().min(u32::MAX as u128) as u32, Ordering::Relaxed);
         } else {
@@ -136,17 +133,11 @@ impl GpuMemBuf {
         }
 
         let start = Instant::now();
-        if mapping_changed {
-            self.vram.maps.read_all_bg_a(&mut refs.bg_a, &self.vram_banks.mem);
-            self.vram.maps.read_all_obj_a(&mut refs.obj_a, &self.vram_banks.mem);
-            self.vram.maps.read_all_bg_a_ext_palette(&mut refs.bg_a_ext_pal, &self.vram_banks.mem);
-            self.vram.maps.read_all_obj_a_ext_palette(&mut refs.obj_a_ext_pal, &self.vram_banks.mem);
-        } else {
-            partial_copied_bytes += self.vram.maps.read_dirty_bg_a(&mut refs.bg_a, &self.vram_banks.mem, &dirty_sections);
-            partial_copied_bytes += self.vram.maps.read_dirty_obj_a(&mut refs.obj_a, &self.vram_banks.mem, &dirty_sections);
-            partial_copied_bytes += self.vram.maps.read_dirty_bg_a_ext_palette(&mut refs.bg_a_ext_pal, &self.vram_banks.mem, &dirty_sections);
-            partial_copied_bytes += self.vram.maps.read_dirty_obj_a_ext_palette(&mut refs.obj_a_ext_pal, &self.vram_banks.mem, &dirty_sections);
-        }
+        // Safety test: Engine A also stays on the original full-refresh path.
+        self.vram.maps.read_all_bg_a(&mut refs.bg_a, &self.vram_banks.mem);
+        self.vram.maps.read_all_obj_a(&mut refs.obj_a, &self.vram_banks.mem);
+        self.vram.maps.read_all_bg_a_ext_palette(&mut refs.bg_a_ext_pal, &self.vram_banks.mem);
+        self.vram.maps.read_all_obj_a_ext_palette(&mut refs.obj_a_ext_pal, &self.vram_banks.mem);
         refs.pal_a.copy_from_slice(&self.pal[..regions::STANDARD_PALETTES_SIZE as usize / 2]);
         refs.oam_a.copy_from_slice(&self.oam[..regions::OAM_SIZE as usize / 2]);
         VRAM_READ_2D_A_US.fetch_add(start.elapsed().as_micros().min(u32::MAX as u128) as u32, Ordering::Relaxed);
