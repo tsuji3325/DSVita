@@ -70,6 +70,24 @@ impl<const SIZE: usize> VramMap<SIZE> {
     pub fn as_mut<'a>(&self, vram: &'a mut [u8; TOTAL_SIZE]) -> &'a mut [u8; SIZE] {
         unsafe { (vram.as_mut_ptr().add(self.offset) as *mut [u8; SIZE]).as_mut_unchecked() }
     }
+
+    fn read_dirty_into(&self, buf: &mut [u8; SIZE], vram: &[u8; TOTAL_SIZE], dirty_sections: &Bitset<6>) -> usize {
+        if self.is_null() {
+            return 0;
+        }
+
+        let src = self.as_ref(vram);
+        let mut copied = 0;
+        for offset in (0..SIZE).step_by(BANK_SECTION_SIZE) {
+            let section = (self.offset + offset) >> BANK_SECTION_SHIFT;
+            if dirty_sections.contains(section) {
+                let end = min(offset + BANK_SECTION_SIZE, SIZE);
+                buf[offset..end].copy_from_slice(&src[offset..end]);
+                copied += end - offset;
+            }
+        }
+        copied
+    }
 }
 
 impl<const SIZE: usize> Default for VramMap<SIZE> {
@@ -125,6 +143,24 @@ impl<const SIZE: usize, const MAX_OVERLAP: usize> OverlapSection<SIZE, MAX_OVERL
                 }
             }
         }
+    }
+
+    fn touches_dirty(&self, dirty_sections: &Bitset<6>) -> bool {
+        unsafe { assert_unchecked((self.count as usize) <= MAX_OVERLAP) };
+        for i in 0..self.count as usize {
+            let map = &self.overlaps[i];
+            if map.is_null() {
+                continue;
+            }
+            let start = map.offset >> BANK_SECTION_SHIFT;
+            let end = (map.offset + SIZE - 1) >> BANK_SECTION_SHIFT;
+            for section in start..=end {
+                if dirty_sections.contains(section) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     fn write<T: utils::Convert>(&self, index: u32, value: T, vram_banks: &mut VramBanks) {
@@ -198,6 +234,24 @@ where
             let chunk_buf = unsafe { (buf[buf_start..buf_end].as_mut_ptr() as *mut [u8; CHUNK_SIZE]).as_mut_unchecked() };
             self.sections[section_index].read_all(section_offset as u32, chunk_buf, vram);
         }
+    }
+
+    fn read_dirty(&self, mut addr: u32, buf: &mut [u8; SIZE], vram: &[u8; TOTAL_SIZE], dirty_sections: &Bitset<6>) -> usize {
+        addr %= SIZE as u32;
+        let mut copied = 0;
+        for chunk_addr in (addr..addr + SIZE as u32).step_by(CHUNK_SIZE) {
+            let section_index = chunk_addr as usize / CHUNK_SIZE;
+            if !self.sections[section_index].touches_dirty(dirty_sections) {
+                continue;
+            }
+            let section_offset = chunk_addr as usize % CHUNK_SIZE;
+            let buf_start = (chunk_addr - addr) as usize;
+            let buf_end = buf_start + CHUNK_SIZE;
+            let chunk_buf = unsafe { (buf[buf_start..buf_end].as_mut_ptr() as *mut [u8; CHUNK_SIZE]).as_mut_unchecked() };
+            self.sections[section_index].read_all(section_offset as u32, chunk_buf, vram);
+            copied += CHUNK_SIZE;
+        }
+        copied
     }
 
     fn write<T: utils::Convert>(&self, mut addr: u32, value: T, vram_banks: &mut VramBanks) {
@@ -434,6 +488,74 @@ impl VramMaps {
                 buf.fill(0);
             }
         }
+    }
+
+    pub fn read_dirty_lcdc(&self, buf: &mut [u8; TOTAL_SIZE], vram: &[u8; TOTAL_SIZE], dirty_sections: &Bitset<6>) -> usize {
+        self.lcdc.read_dirty(0, buf, vram, dirty_sections)
+    }
+
+    pub fn read_dirty_bg_a(&self, buf: &mut [u8; BG_A_SIZE], vram: &[u8; TOTAL_SIZE], dirty_sections: &Bitset<6>) -> usize {
+        self.bg_a.read_dirty(0, buf, vram, dirty_sections)
+    }
+
+    pub fn read_dirty_obj_a(&self, buf: &mut [u8; OBJ_A_SIZE], vram: &[u8; TOTAL_SIZE], dirty_sections: &Bitset<6>) -> usize {
+        self.obj_a.read_dirty(0, buf, vram, dirty_sections)
+    }
+
+    pub fn read_dirty_bg_a_ext_palette(&self, buf: &mut [u8; BG_EXT_PAL_SIZE], vram: &[u8; TOTAL_SIZE], dirty_sections: &Bitset<6>) -> usize {
+        let mut copied = 0;
+        for i in 0..self.bg_ext_palette_a.len() {
+            let map = &self.bg_ext_palette_a[i];
+            let chunk = unsafe { (&mut buf[i << 13..(i << 13) + 8 * 1024].as_mut_ptr().cast::<[u8; 8 * 1024]>()).as_mut_unchecked() };
+            copied += map.read_dirty_into(chunk, vram, dirty_sections);
+        }
+        copied
+    }
+
+    pub fn read_dirty_obj_a_ext_palette(&self, buf: &mut [u8; OBJ_EXT_PAL_SIZE], vram: &[u8; TOTAL_SIZE], dirty_sections: &Bitset<6>) -> usize {
+        self.obj_ext_palette_a.read_dirty_into(buf, vram, dirty_sections)
+    }
+
+    pub fn read_dirty_bg_b(&self, buf: &mut [u8; BG_B_SIZE], vram: &[u8; TOTAL_SIZE], dirty_sections: &Bitset<6>) -> usize {
+        self.bg_b.read_dirty(0, buf, vram, dirty_sections)
+    }
+
+    pub fn read_dirty_obj_b(&self, buf: &mut [u8; OBJ_B_SIZE], vram: &[u8; TOTAL_SIZE], dirty_sections: &Bitset<6>) -> usize {
+        self.obj_b.read_dirty(0, buf, vram, dirty_sections)
+    }
+
+    pub fn read_dirty_bg_b_ext_palette(&self, buf: &mut [u8; BG_EXT_PAL_SIZE], vram: &[u8; TOTAL_SIZE], dirty_sections: &Bitset<6>) -> usize {
+        let mut copied = 0;
+        for i in 0..self.bg_ext_palette_b.len() {
+            let map = &self.bg_ext_palette_b[i];
+            let chunk = unsafe { (&mut buf[i << 13..(i << 13) + 8 * 1024].as_mut_ptr().cast::<[u8; 8 * 1024]>()).as_mut_unchecked() };
+            copied += map.read_dirty_into(chunk, vram, dirty_sections);
+        }
+        copied
+    }
+
+    pub fn read_dirty_obj_b_ext_palette(&self, buf: &mut [u8; OBJ_EXT_PAL_SIZE], vram: &[u8; TOTAL_SIZE], dirty_sections: &Bitset<6>) -> usize {
+        self.obj_ext_palette_b.read_dirty_into(buf, vram, dirty_sections)
+    }
+
+    pub fn read_dirty_tex_rear_plane_img(&self, buf: &mut [u8; TEX_REAR_PLANE_IMAGE_SIZE], vram: &[u8; TOTAL_SIZE], dirty_sections: &Bitset<6>) -> usize {
+        let mut copied = 0;
+        for i in 0..self.tex_rear_plane_img.len() {
+            let map = &self.tex_rear_plane_img[i];
+            let chunk = unsafe { (&mut buf[i << 17..(i << 17) + 128 * 1024].as_mut_ptr().cast::<[u8; 128 * 1024]>()).as_mut_unchecked() };
+            copied += map.read_dirty_into(chunk, vram, dirty_sections);
+        }
+        copied
+    }
+
+    pub fn read_dirty_tex_palette(&self, buf: &mut [u8; TEX_PAL_SIZE], vram: &[u8; TOTAL_SIZE], dirty_sections: &Bitset<6>) -> usize {
+        let mut copied = 0;
+        for i in 0..self.tex_palette.len() {
+            let map = &self.tex_palette[i];
+            let chunk = unsafe { (&mut buf[i << 14..(i << 14) + 16 * 1024].as_mut_ptr().cast::<[u8; 16 * 1024]>()).as_mut_unchecked() };
+            copied += map.read_dirty_into(chunk, vram, dirty_sections);
+        }
+        copied
     }
 
     pub fn is_tex_rear_plane_img_dirty(&self, start: u32, end: u32, other: &[u8; 4], dirty_sections: &Bitset<6>) -> bool {
