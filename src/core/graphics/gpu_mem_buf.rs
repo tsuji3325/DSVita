@@ -3,6 +3,31 @@ use crate::core::graphics::gpu::DispCapCnt;
 use crate::core::memory::vram::{Vram, VramBanks, VramCnt};
 use crate::core::memory::{regions, vram};
 use crate::utils::{self, HeapArrayU8, PtrWrapper};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Instant;
+
+pub static GPU_MEM_READ_VRAM_US: AtomicU32 = AtomicU32::new(0);
+pub static GPU_MEM_READ_VRAM_MAX_US: AtomicU32 = AtomicU32::new(0);
+pub static GPU_MEM_REBUILD_MAPS_US: AtomicU32 = AtomicU32::new(0);
+pub static GPU_MEM_REBUILD_MAPS_MAX_US: AtomicU32 = AtomicU32::new(0);
+pub static GPU_MEM_INSERT_CAPTURE_US: AtomicU32 = AtomicU32::new(0);
+pub static GPU_MEM_INSERT_CAPTURE_MAX_US: AtomicU32 = AtomicU32::new(0);
+pub static GPU_MEM_READ_ALL_US: AtomicU32 = AtomicU32::new(0);
+pub static GPU_MEM_READ_ALL_MAX_US: AtomicU32 = AtomicU32::new(0);
+pub static GPU_MEM_READ_2D_US: AtomicU32 = AtomicU32::new(0);
+pub static GPU_MEM_READ_3D_US: AtomicU32 = AtomicU32::new(0);
+
+#[inline]
+fn perf_add_max(total: &AtomicU32, max: &AtomicU32, micros: u32) {
+    total.fetch_add(micros, Ordering::Relaxed);
+    let mut old = max.load(Ordering::Relaxed);
+    while micros > old {
+        match max.compare_exchange_weak(old, micros, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(current) => old = current,
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct GpuMemRefs {
@@ -47,9 +72,12 @@ impl GpuMemBuf {
     }
 
     pub fn read_vram(&mut self, vram_banks: &mut VramBanks) {
+        let start = Instant::now();
         vram_banks.copy_dirty_sections(&mut self.vram_banks.mem);
         self.vram_banks_dirty_sections += vram_banks.dirty_sections;
         vram_banks.dirty_sections.clear();
+        let us = start.elapsed().as_micros().min(u32::MAX as u128) as u32;
+        perf_add_max(&GPU_MEM_READ_VRAM_US, &GPU_MEM_READ_VRAM_MAX_US, us);
     }
 
     pub fn read_palettes_oam(&mut self, palettes: &[u8; regions::STANDARD_PALETTES_SIZE as usize], oam: &[u8; regions::OAM_SIZE as usize]) {
@@ -64,10 +92,16 @@ impl GpuMemBuf {
     }
 
     pub fn rebuild_vram_maps(&mut self) {
+        let start = Instant::now();
         self.vram.rebuild_maps();
+        let us = start.elapsed().as_micros().min(u32::MAX as u128) as u32;
+        perf_add_max(&GPU_MEM_REBUILD_MAPS_US, &GPU_MEM_REBUILD_MAPS_MAX_US, us);
     }
 
     pub fn read_all(&self, refs: &mut GpuMemRefs, read_lcdc: bool, read_3d: bool) {
+        let all_start = Instant::now();
+        let read_2d_start = Instant::now();
+
         if read_lcdc {
             self.vram.maps.read_all_lcdc(&mut refs.lcdc, &self.vram_banks.mem);
         }
@@ -86,13 +120,23 @@ impl GpuMemBuf {
         refs.pal_b.copy_from_slice(&self.pal[regions::STANDARD_PALETTES_SIZE as usize / 2..]);
         refs.oam_b.copy_from_slice(&self.oam[regions::OAM_SIZE as usize / 2..]);
 
+        let read_2d_us = read_2d_start.elapsed().as_micros().min(u32::MAX as u128) as u32;
+        GPU_MEM_READ_2D_US.fetch_add(read_2d_us, Ordering::Relaxed);
+
         if read_3d {
+            let read_3d_start = Instant::now();
             self.vram.maps.read_all_tex_rear_plane_img(&mut refs.tex_rear_plane_image, &self.vram_banks.mem);
             self.vram.maps.read_all_tex_palette(&mut refs.tex_pal, &self.vram_banks.mem);
+            let read_3d_us = read_3d_start.elapsed().as_micros().min(u32::MAX as u128) as u32;
+            GPU_MEM_READ_3D_US.fetch_add(read_3d_us, Ordering::Relaxed);
         }
+
+        let all_us = all_start.elapsed().as_micros().min(u32::MAX as u128) as u32;
+        perf_add_max(&GPU_MEM_READ_ALL_US, &GPU_MEM_READ_ALL_MAX_US, all_us);
     }
 
     pub fn insert_capture_mem(&mut self, capture_mem: &[u8; vram::BANK_A_SIZE * 4]) {
+        let start = Instant::now();
         for bank_num in 0..4 {
             if !VramCnt::from(self.vram.cnt[bank_num]).enable() {
                 continue;
@@ -114,5 +158,7 @@ impl GpuMemBuf {
                 }
             }
         }
+        let us = start.elapsed().as_micros().min(u32::MAX as u128) as u32;
+        perf_add_max(&GPU_MEM_INSERT_CAPTURE_US, &GPU_MEM_INSERT_CAPTURE_MAX_US, us);
     }
 }
