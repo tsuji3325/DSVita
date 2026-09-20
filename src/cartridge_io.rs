@@ -277,7 +277,10 @@ impl CartridgeIo {
                     let start = content_offset as usize * CARTRIDGE_PAGE_SIZE;
                     assert_unchecked(start + CARTRIDGE_PAGE_SIZE <= self.content_cache.len());
                     let buf = &mut self.content_cache[start..start + CARTRIDGE_PAGE_SIZE];
+                    let read_start = Instant::now();
                     self.file.read_at(buf, page_addr as u64)?;
+                    let read_us = read_start.elapsed().as_micros().min(u32::MAX as u128) as u32;
+                    crate::perf_diag::record_rom_page_read(read_us);
                     self.content_pages.insert(page_addr, content_offset);
                     Ok(buf.as_ptr() as _)
                 }
