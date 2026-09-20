@@ -669,7 +669,7 @@ fn emit_code_block_internal(asm: &mut JitAsm, guest_pc: u32, thumb: bool) {
                 .iter()
                 .any(|overlay| guest_pc >= overlay.ram_address && guest_pc < overlay.ram_address_end())
         {
-            200
+            240
         } else {
             crate::jit::interpreter::INTERP_THRESHOLD
         };
