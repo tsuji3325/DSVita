@@ -3,6 +3,7 @@ use crate::core::graphics::gpu::DispCapCnt;
 use crate::core::memory::vram::{Vram, VramBanks, VramCnt};
 use crate::core::memory::{regions, vram};
 use crate::utils::{self, HeapArrayU8, PtrWrapper};
+use std::time::Instant;
 #[derive(Default)]
 pub struct GpuMemRefs {
     pub lcdc: PtrWrapper<[u8; vram::TOTAL_SIZE]>,
@@ -72,10 +73,11 @@ impl GpuMemBuf {
         self.vram.rebuild_maps();
     }
 
-    pub fn read_all(&mut self, refs: &mut GpuMemRefs, read_lcdc: bool, read_3d: bool) {
+    pub fn read_all(&mut self, refs: &mut GpuMemRefs, read_lcdc: bool, read_3d: bool) -> (u32, u32) {
         let mapping_changed = !self.vram_read_initialized || self.last_read_vram_cnt != self.vram.cnt;
         let dirty_sections = self.vram_banks.dirty_sections;
 
+        let vram_2d_start = Instant::now();
         if read_lcdc {
             self.vram.maps.read_all_lcdc(&mut refs.lcdc, &self.vram_banks.mem);
         }
@@ -95,7 +97,9 @@ impl GpuMemBuf {
         self.vram.maps.read_all_obj_b_ext_palette(&mut refs.obj_b_ext_pal, &self.vram_banks.mem);
         refs.pal_b.copy_from_slice(&self.pal[regions::STANDARD_PALETTES_SIZE as usize / 2..]);
         refs.oam_b.copy_from_slice(&self.oam[regions::OAM_SIZE as usize / 2..]);
+        let vram_2d_us = vram_2d_start.elapsed().as_micros().min(u32::MAX as u128) as u32;
 
+        let vram_3d_start = Instant::now();
         // 3D texture/palette VRAM is safe to update by dirty section while the
         // VRAM mapping is unchanged. Mapping changes still force a full refresh.
         if read_3d {
@@ -113,8 +117,11 @@ impl GpuMemBuf {
             self.tex_read_valid = false;
         }
 
+        let vram_3d_us = vram_3d_start.elapsed().as_micros().min(u32::MAX as u128) as u32;
+
         self.last_read_vram_cnt = self.vram.cnt;
         self.vram_read_initialized = true;
+        (vram_2d_us, vram_3d_us)
     }
 
     pub fn insert_capture_mem(&mut self, capture_mem: &[u8; vram::BANK_A_SIZE * 4]) {
