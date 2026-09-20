@@ -867,7 +867,14 @@ impl<'a> JitAsm<'a> {
 
     pub fn execute<const CPU: CpuType>(&mut self) -> u16 {
         let entry = CPU.thread_regs().pc;
-        execute_internal::<CPU>(entry)
+        if CPU == ARM9 {
+            crate::perf_diag::publish_arm9_pc(entry);
+        }
+        let cycles = execute_internal::<CPU>(entry);
+        if CPU == ARM9 {
+            crate::perf_diag::clear_arm9_pc();
+        }
+        cycles
     }
 
     pub fn fill_jit_insts_buf(cpu: CpuType, insts: &mut Vec<InstInfo>, cycle_counts: &mut Vec<u16>, emu: &mut Emu, guest_pc: u32, thumb: bool, until_bx: bool) -> u32 {
