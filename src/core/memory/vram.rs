@@ -506,7 +506,7 @@ impl VramMaps {
         let mut copied = 0;
         for i in 0..self.bg_ext_palette_a.len() {
             let map = &self.bg_ext_palette_a[i];
-            let chunk = unsafe { (&mut buf[i << 13..(i << 13) + 8 * 1024].as_mut_ptr().cast::<[u8; 8 * 1024]>()).as_mut_unchecked() };
+            let chunk = unsafe { (buf[i << 13..(i << 13) + 8 * 1024].as_mut_ptr() as *mut [u8; 8 * 1024]).as_mut_unchecked() };
             copied += map.read_dirty_into(chunk, vram, dirty_sections);
         }
         copied
@@ -528,7 +528,7 @@ impl VramMaps {
         let mut copied = 0;
         for i in 0..self.bg_ext_palette_b.len() {
             let map = &self.bg_ext_palette_b[i];
-            let chunk = unsafe { (&mut buf[i << 13..(i << 13) + 8 * 1024].as_mut_ptr().cast::<[u8; 8 * 1024]>()).as_mut_unchecked() };
+            let chunk = unsafe { (buf[i << 13..(i << 13) + 8 * 1024].as_mut_ptr() as *mut [u8; 8 * 1024]).as_mut_unchecked() };
             copied += map.read_dirty_into(chunk, vram, dirty_sections);
         }
         copied
@@ -542,7 +542,7 @@ impl VramMaps {
         let mut copied = 0;
         for i in 0..self.tex_rear_plane_img.len() {
             let map = &self.tex_rear_plane_img[i];
-            let chunk = unsafe { (&mut buf[i << 17..(i << 17) + 128 * 1024].as_mut_ptr().cast::<[u8; 128 * 1024]>()).as_mut_unchecked() };
+            let chunk = unsafe { (buf[i << 17..(i << 17) + 128 * 1024].as_mut_ptr() as *mut [u8; 128 * 1024]).as_mut_unchecked() };
             copied += map.read_dirty_into(chunk, vram, dirty_sections);
         }
         copied
@@ -552,7 +552,7 @@ impl VramMaps {
         let mut copied = 0;
         for i in 0..self.tex_palette.len() {
             let map = &self.tex_palette[i];
-            let chunk = unsafe { (&mut buf[i << 14..(i << 14) + 16 * 1024].as_mut_ptr().cast::<[u8; 16 * 1024]>()).as_mut_unchecked() };
+            let chunk = unsafe { (buf[i << 14..(i << 14) + 16 * 1024].as_mut_ptr() as *mut [u8; 16 * 1024]).as_mut_unchecked() };
             copied += map.read_dirty_into(chunk, vram, dirty_sections);
         }
         copied
