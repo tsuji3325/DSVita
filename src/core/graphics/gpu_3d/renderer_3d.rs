@@ -3,6 +3,7 @@ use crate::core::graphics::gpu::{PowCnt1, DISPLAY_HEIGHT, DISPLAY_WIDTH};
 use crate::core::graphics::gpu_3d::registers_3d::{Gpu3DBuffer, Gpu3DRegisters, PolygonAttr, PolygonMode, PrimitiveType, TexImageParam, TextureCoordTransMode, TextureFormat, Vertex, Viewport};
 use crate::core::graphics::gpu_3d::registers_3d::{POLYGON_LIMIT, VERTEX_LIMIT};
 use crate::core::graphics::gpu_3d::texture_cache::{Texture3D, Texture3DCache};
+pub use crate::core::graphics::gpu_3d::texture_cache::{TEX_BUILD_MAX_US, TEX_BUILD_US, TEX_DIRTY_MARKS, TEX_EVICTIONS, TEX_NEW_BUILDS, TEX_REBUILDS};
 use crate::core::graphics::gpu_mem_buf::{GpuMemBuf, GpuMemRefs};
 use crate::core::graphics::gpu_renderer::GpuRendererCommon;
 use crate::core::graphics::gpu_shaders::{Gpu3DShaderDepthPrograms, Gpu3DShaderPrograms, GpuShadersPrograms};
