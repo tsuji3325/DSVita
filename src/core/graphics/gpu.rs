@@ -27,6 +27,7 @@ struct FrameRateCounter {
     frame_counter: u16,
     fps: Arc<AtomicU16>,
     last_update: Instant,
+    last_frame_ready: Option<Instant>,
 }
 
 impl FrameRateCounter {
@@ -35,12 +36,23 @@ impl FrameRateCounter {
             frame_counter: 0,
             fps,
             last_update: Instant::now(),
+            last_frame_ready: None,
         }
     }
 
     fn on_frame_ready(&mut self) {
         self.frame_counter += 1;
         let now = Instant::now();
+
+        if let Some(last_frame_ready) = self.last_frame_ready {
+            let micros = now.duration_since(last_frame_ready).as_micros().min(u32::MAX as u128) as u32;
+            crate::perf_diag::record_cpu_frame_interval(micros);
+        } else {
+            // Drop any ROM reads accumulated during boot before the first complete frame.
+            crate::perf_diag::record_cpu_frame_interval(0);
+        }
+        self.last_frame_ready = Some(now);
+
         if unlikely(now.duration_since(self.last_update).as_millis() >= 1000) {
             self.fps.store(self.frame_counter, Ordering::Relaxed);
             #[cfg(not(target_os = "vita"))]
@@ -48,6 +60,12 @@ impl FrameRateCounter {
             self.frame_counter = 0;
             self.last_update = now;
         }
+    }
+
+    fn reset(&mut self) {
+        self.frame_counter = 0;
+        self.last_update = Instant::now();
+        self.last_frame_ready = None;
     }
 }
 
@@ -158,6 +176,7 @@ impl Gpu {
         self.gpu_2d_regs_a = Gpu2DRegisters::new(A);
         self.gpu_2d_regs_b = Gpu2DRegisters::new(B);
         self.gpu_3d_regs.init();
+        self.frame_rate_counter.reset();
     }
 
     pub fn set_gpu_renderer(&mut self, gpu_renderer: NonNull<GpuRenderer>) {
