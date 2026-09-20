@@ -18,6 +18,10 @@ pub static VRAM_READ_LCDC_US: AtomicU32 = AtomicU32::new(0);
 pub static VRAM_READ_2D_A_US: AtomicU32 = AtomicU32::new(0);
 pub static VRAM_READ_2D_B_US: AtomicU32 = AtomicU32::new(0);
 pub static VRAM_READ_3D_US: AtomicU32 = AtomicU32::new(0);
+pub static VRAM_FULL_READ_COUNT: AtomicU32 = AtomicU32::new(0);
+pub static VRAM_PARTIAL_READ_COUNT: AtomicU32 = AtomicU32::new(0);
+pub static VRAM_PARTIAL_COPIED_BYTES: AtomicU32 = AtomicU32::new(0);
+pub static VRAM_MAPPING_CHANGE_COUNT: AtomicU32 = AtomicU32::new(0);
 
 #[inline]
 fn perf_add_max(total: &AtomicU32, max: &AtomicU32, micros: u32) {
@@ -59,6 +63,10 @@ pub struct GpuMemBuf {
     queued_vram_cnt: [u8; vram::BANK_SIZE],
     pub vram_banks: VramBanks,
     vram_banks_dirty_sections: Bitset<6>,
+    last_read_vram_cnt: [u8; vram::BANK_SIZE],
+    vram_read_initialized: bool,
+    lcdc_read_valid: bool,
+    tex_read_valid: bool,
     pub pal: HeapArrayU8<{ regions::STANDARD_PALETTES_SIZE as usize }>,
     pub oam: HeapArrayU8<{ regions::OAM_SIZE as usize }>,
 }
@@ -67,6 +75,10 @@ impl GpuMemBuf {
     pub fn init(&mut self) {
         self.vram = Vram::default();
         self.vram_banks.dirty_sections.clear();
+        self.last_read_vram_cnt = [0; vram::BANK_SIZE];
+        self.vram_read_initialized = false;
+        self.lcdc_read_valid = false;
+        self.tex_read_valid = false;
     }
 
     pub fn queue_vram(&mut self, vram: &Vram) {
@@ -100,39 +112,85 @@ impl GpuMemBuf {
         perf_add_max(&VRAM_MAP_REBUILD_US, &VRAM_MAP_REBUILD_MAX_US, micros);
     }
 
-    pub fn read_all(&self, refs: &mut GpuMemRefs, read_lcdc: bool, read_3d: bool) {
+    pub fn read_all(&mut self, refs: &mut GpuMemRefs, read_lcdc: bool, read_3d: bool) {
         let read_all_start = Instant::now();
+        let mapping_changed = !self.vram_read_initialized || self.last_read_vram_cnt != self.vram.cnt;
+        if mapping_changed {
+            VRAM_MAPPING_CHANGE_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+
+        let dirty_sections = self.vram_banks.dirty_sections;
+        let mut partial_copied_bytes = 0usize;
 
         if read_lcdc {
             let start = Instant::now();
-            self.vram.maps.read_all_lcdc(&mut refs.lcdc, &self.vram_banks.mem);
+            if mapping_changed || !self.lcdc_read_valid {
+                self.vram.maps.read_all_lcdc(&mut refs.lcdc, &self.vram_banks.mem);
+            } else {
+                partial_copied_bytes += self.vram.maps.read_dirty_lcdc(&mut refs.lcdc, &self.vram_banks.mem, &dirty_sections);
+            }
+            self.lcdc_read_valid = true;
             VRAM_READ_LCDC_US.fetch_add(start.elapsed().as_micros().min(u32::MAX as u128) as u32, Ordering::Relaxed);
+        } else {
+            self.lcdc_read_valid = false;
         }
 
         let start = Instant::now();
-        self.vram.maps.read_all_bg_a(&mut refs.bg_a, &self.vram_banks.mem);
-        self.vram.maps.read_all_obj_a(&mut refs.obj_a, &self.vram_banks.mem);
-        self.vram.maps.read_all_bg_a_ext_palette(&mut refs.bg_a_ext_pal, &self.vram_banks.mem);
-        self.vram.maps.read_all_obj_a_ext_palette(&mut refs.obj_a_ext_pal, &self.vram_banks.mem);
+        if mapping_changed {
+            self.vram.maps.read_all_bg_a(&mut refs.bg_a, &self.vram_banks.mem);
+            self.vram.maps.read_all_obj_a(&mut refs.obj_a, &self.vram_banks.mem);
+            self.vram.maps.read_all_bg_a_ext_palette(&mut refs.bg_a_ext_pal, &self.vram_banks.mem);
+            self.vram.maps.read_all_obj_a_ext_palette(&mut refs.obj_a_ext_pal, &self.vram_banks.mem);
+        } else {
+            partial_copied_bytes += self.vram.maps.read_dirty_bg_a(&mut refs.bg_a, &self.vram_banks.mem, &dirty_sections);
+            partial_copied_bytes += self.vram.maps.read_dirty_obj_a(&mut refs.obj_a, &self.vram_banks.mem, &dirty_sections);
+            partial_copied_bytes += self.vram.maps.read_dirty_bg_a_ext_palette(&mut refs.bg_a_ext_pal, &self.vram_banks.mem, &dirty_sections);
+            partial_copied_bytes += self.vram.maps.read_dirty_obj_a_ext_palette(&mut refs.obj_a_ext_pal, &self.vram_banks.mem, &dirty_sections);
+        }
         refs.pal_a.copy_from_slice(&self.pal[..regions::STANDARD_PALETTES_SIZE as usize / 2]);
         refs.oam_a.copy_from_slice(&self.oam[..regions::OAM_SIZE as usize / 2]);
         VRAM_READ_2D_A_US.fetch_add(start.elapsed().as_micros().min(u32::MAX as u128) as u32, Ordering::Relaxed);
 
         let start = Instant::now();
-        self.vram.maps.read_bg_b(&mut refs.bg_b, &self.vram_banks.mem);
-        self.vram.maps.read_all_obj_b(&mut refs.obj_b, &self.vram_banks.mem);
-        self.vram.maps.read_all_bg_b_ext_palette(&mut refs.bg_b_ext_pal, &self.vram_banks.mem);
-        self.vram.maps.read_all_obj_b_ext_palette(&mut refs.obj_b_ext_pal, &self.vram_banks.mem);
+        if mapping_changed {
+            self.vram.maps.read_bg_b(&mut refs.bg_b, &self.vram_banks.mem);
+            self.vram.maps.read_all_obj_b(&mut refs.obj_b, &self.vram_banks.mem);
+            self.vram.maps.read_all_bg_b_ext_palette(&mut refs.bg_b_ext_pal, &self.vram_banks.mem);
+            self.vram.maps.read_all_obj_b_ext_palette(&mut refs.obj_b_ext_pal, &self.vram_banks.mem);
+        } else {
+            partial_copied_bytes += self.vram.maps.read_dirty_bg_b(&mut refs.bg_b, &self.vram_banks.mem, &dirty_sections);
+            partial_copied_bytes += self.vram.maps.read_dirty_obj_b(&mut refs.obj_b, &self.vram_banks.mem, &dirty_sections);
+            partial_copied_bytes += self.vram.maps.read_dirty_bg_b_ext_palette(&mut refs.bg_b_ext_pal, &self.vram_banks.mem, &dirty_sections);
+            partial_copied_bytes += self.vram.maps.read_dirty_obj_b_ext_palette(&mut refs.obj_b_ext_pal, &self.vram_banks.mem, &dirty_sections);
+        }
         refs.pal_b.copy_from_slice(&self.pal[regions::STANDARD_PALETTES_SIZE as usize / 2..]);
         refs.oam_b.copy_from_slice(&self.oam[regions::OAM_SIZE as usize / 2..]);
         VRAM_READ_2D_B_US.fetch_add(start.elapsed().as_micros().min(u32::MAX as u128) as u32, Ordering::Relaxed);
 
         if read_3d {
             let start = Instant::now();
-            self.vram.maps.read_all_tex_rear_plane_img(&mut refs.tex_rear_plane_image, &self.vram_banks.mem);
-            self.vram.maps.read_all_tex_palette(&mut refs.tex_pal, &self.vram_banks.mem);
+            if mapping_changed || !self.tex_read_valid {
+                self.vram.maps.read_all_tex_rear_plane_img(&mut refs.tex_rear_plane_image, &self.vram_banks.mem);
+                self.vram.maps.read_all_tex_palette(&mut refs.tex_pal, &self.vram_banks.mem);
+            } else {
+                partial_copied_bytes += self.vram.maps.read_dirty_tex_rear_plane_img(&mut refs.tex_rear_plane_image, &self.vram_banks.mem, &dirty_sections);
+                partial_copied_bytes += self.vram.maps.read_dirty_tex_palette(&mut refs.tex_pal, &self.vram_banks.mem, &dirty_sections);
+            }
+            self.tex_read_valid = true;
             VRAM_READ_3D_US.fetch_add(start.elapsed().as_micros().min(u32::MAX as u128) as u32, Ordering::Relaxed);
+        } else {
+            self.tex_read_valid = false;
         }
+
+        if mapping_changed {
+            VRAM_FULL_READ_COUNT.fetch_add(1, Ordering::Relaxed);
+        } else {
+            VRAM_PARTIAL_READ_COUNT.fetch_add(1, Ordering::Relaxed);
+            VRAM_PARTIAL_COPIED_BYTES.fetch_add(partial_copied_bytes.min(u32::MAX as usize) as u32, Ordering::Relaxed);
+        }
+
+        self.last_read_vram_cnt = self.vram.cnt;
+        self.vram_read_initialized = true;
 
         let micros = read_all_start.elapsed().as_micros().min(u32::MAX as u128) as u32;
         perf_add_max(&VRAM_READ_ALL_US, &VRAM_READ_ALL_MAX_US, micros);
@@ -158,6 +216,12 @@ impl GpuMemBuf {
                     let capture_offset = bank_num * vram::BANK_A_SIZE + offset;
                     let capture_mem = &capture_mem[capture_offset..capture_offset + bytes_len];
                     bank[..bytes_len].copy_from_slice(capture_mem);
+
+                    let start_section = capture_offset >> 12;
+                    let end_section = (capture_offset + bytes_len - 1) >> 12;
+                    for section in start_section..=end_section {
+                        self.vram_banks.dirty_sections += section;
+                    }
                 }
             }
         }
