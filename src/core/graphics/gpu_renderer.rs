@@ -9,6 +9,10 @@ use crate::core::graphics::gpu_2d::Gpu2DEngine::{A, B};
 use crate::core::graphics::gpu_3d::registers_3d::Gpu3DRegisters;
 use crate::core::graphics::gpu_3d::renderer_3d::{Gpu3DRenderer, WidescreenOption};
 use crate::core::graphics::gpu_mem_buf::{GpuMemBuf, GpuMemRefs};
+pub use crate::core::graphics::gpu_mem_buf::{
+    GPU_MEM_INSERT_CAPTURE_MAX_US, GPU_MEM_INSERT_CAPTURE_US, GPU_MEM_READ_2D_US, GPU_MEM_READ_3D_US, GPU_MEM_READ_ALL_MAX_US, GPU_MEM_READ_ALL_US, GPU_MEM_READ_VRAM_MAX_US,
+    GPU_MEM_READ_VRAM_US, GPU_MEM_REBUILD_MAPS_MAX_US, GPU_MEM_REBUILD_MAPS_US,
+};
 use crate::core::graphics::gpu_shaders::GpuShadersPrograms;
 use crate::core::memory::regions::{OAM_SIZE, STANDARD_PALETTES_SIZE};
 use crate::core::memory::vram;
