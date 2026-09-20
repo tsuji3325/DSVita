@@ -520,61 +520,8 @@ fn append_overlay_perf_log(
     vram_partial_copied_bytes: u32,
     vram_mapping_change_count: u32,
 ) {
-    use std::io::Write;
-
-    let _ = std::fs::create_dir_all("ux0:data/dsvita");
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("ux0:data/dsvita/overlay_perf.log") {
-        let _ = writeln!(
-            file,
-            "overlay id={} addr={:08x} size={} compiled_since_prev={} write_invalidations={} hook_invalidated_pages={} jit_allocated_bytes={} jit_cache_resets={} jit_freed_blocks={} jit_freed_bytes={} gpu3d_process_count={} gpu3d_process_us={} gpu3d_process_max_us={} gpu3d_vertices_us={} gpu3d_vertices_max_us={} gpu3d_assemble_us={} gpu3d_assemble_max_us={} gpu3d_vram_wait_us={} gpu3d_vram_wait_max_us={} gpu3d_tex_cache_us={} gpu3d_tex_cache_max_us={} tex_dirty_marks={} tex_rebuilds={} tex_new_builds={} tex_evictions={} tex_build_us={} tex_build_max_us={} tex_upload_count={} tex_upload_us={} tex_upload_max_us={} vram_dirty_copy_us={} vram_dirty_copy_max_us={} vram_map_rebuild_us={} vram_map_rebuild_max_us={} vram_capture_insert_us={} vram_capture_insert_max_us={} vram_read_all_us={} vram_read_all_max_us={} vram_read_lcdc_us={} vram_read_2d_a_us={} vram_read_2d_b_us={} vram_read_3d_us={} vram_full_read_count={} vram_partial_read_count={} vram_partial_copied_bytes={} vram_mapping_change_count={}",
-            id,
-            ram_address,
-            total_size,
-            compiled_since_prev,
-            write_invalidations,
-            hook_invalidated_pages,
-            jit_allocated_bytes,
-            jit_cache_resets,
-            jit_freed_blocks,
-            jit_freed_bytes,
-            gpu3d_process_count,
-            gpu3d_process_us,
-            gpu3d_process_max_us,
-            gpu3d_vertices_us,
-            gpu3d_vertices_max_us,
-            gpu3d_assemble_us,
-            gpu3d_assemble_max_us,
-            gpu3d_vram_wait_us,
-            gpu3d_vram_wait_max_us,
-            gpu3d_tex_cache_us,
-            gpu3d_tex_cache_max_us,
-            tex_dirty_marks,
-            tex_rebuilds,
-            tex_new_builds,
-            tex_evictions,
-            tex_build_us,
-            tex_build_max_us,
-            tex_upload_count,
-            tex_upload_us,
-            tex_upload_max_us,
-            vram_dirty_copy_us,
-            vram_dirty_copy_max_us,
-            vram_map_rebuild_us,
-            vram_map_rebuild_max_us,
-            vram_capture_insert_us,
-            vram_capture_insert_max_us,
-            vram_read_all_us,
-            vram_read_all_max_us,
-            vram_read_lcdc_us,
-            vram_read_2d_a_us,
-            vram_read_2d_b_us,
-            vram_read_3d_us,
-            vram_full_read_count,
-            vram_partial_read_count,
-            vram_partial_copied_bytes,
-            vram_mapping_change_count
-        );
-    }
+    // Practical performance test: keep diagnostics counters but avoid synchronous
+    // filesystem I/O on every overlay event.
 }
 
 #[cfg(not(target_os = "vita"))]
