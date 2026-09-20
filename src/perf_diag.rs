@@ -91,6 +91,10 @@ pub(crate) fn record_cpu_frame_interval(micros: u32) {
     let frame_rom_misses = STATS[ROM_CUR_MISSES].swap(0, Ordering::Relaxed);
     let frame_rom_us = STATS[ROM_CUR_US].swap(0, Ordering::Relaxed);
 
+    if micros == 0 {
+        return;
+    }
+
     add(CPU_FRAME_COUNT, 1);
     add(CPU_FRAME_US, micros);
     update_max(CPU_FRAME_MAX_US, micros);
