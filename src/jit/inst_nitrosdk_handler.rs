@@ -1,4 +1,10 @@
 use crate::core::emu::NitroSdkVersion;
+use crate::core::graphics::gpu_3d::renderer_3d::{
+    GPU3D_PROCESS_COUNT, GPU3D_PROCESS_MAX_US, GPU3D_PROCESS_US, GPU3D_TEX_CACHE_MAX_US, GPU3D_TEX_CACHE_US, GPU3D_VRAM_WAIT_MAX_US, GPU3D_VRAM_WAIT_US,
+};
+use crate::core::graphics::gpu_3d::texture_cache::{
+    TEX_BUILD_MAX_US, TEX_BUILD_US, TEX_DIRTY_MARKS, TEX_EVICTIONS, TEX_NEW_BUILDS, TEX_REBUILDS,
+};
 use crate::core::memory::regions::{self, OAM_OFFSET};
 use crate::core::CpuType::ARM9;
 use crate::core::{div_sqrt, CpuType};
@@ -473,6 +479,19 @@ fn append_overlay_perf_log(
     jit_cache_resets: u32,
     jit_freed_blocks: u32,
     jit_freed_bytes: u32,
+    gpu3d_process_count: u32,
+    gpu3d_process_us: u32,
+    gpu3d_process_max_us: u32,
+    gpu3d_vram_wait_us: u32,
+    gpu3d_vram_wait_max_us: u32,
+    gpu3d_tex_cache_us: u32,
+    gpu3d_tex_cache_max_us: u32,
+    tex_dirty_marks: u32,
+    tex_rebuilds: u32,
+    tex_new_builds: u32,
+    tex_evictions: u32,
+    tex_build_us: u32,
+    tex_build_max_us: u32,
 ) {
     use std::io::Write;
 
@@ -480,7 +499,7 @@ fn append_overlay_perf_log(
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("ux0:data/dsvita/overlay_perf.log") {
         let _ = writeln!(
             file,
-            "overlay id={} addr={:08x} size={} compiled_since_prev={} write_invalidations={} hook_invalidated_pages={} jit_allocated_bytes={} jit_cache_resets={} jit_freed_blocks={} jit_freed_bytes={}",
+            "overlay id={} addr={:08x} size={} compiled_since_prev={} write_invalidations={} hook_invalidated_pages={} jit_allocated_bytes={} jit_cache_resets={} jit_freed_blocks={} jit_freed_bytes={} gpu3d_process_count={} gpu3d_process_us={} gpu3d_process_max_us={} gpu3d_vram_wait_us={} gpu3d_vram_wait_max_us={} gpu3d_tex_cache_us={} gpu3d_tex_cache_max_us={} tex_dirty_marks={} tex_rebuilds={} tex_new_builds={} tex_evictions={} tex_build_us={} tex_build_max_us={}",
             id,
             ram_address,
             total_size,
@@ -490,7 +509,20 @@ fn append_overlay_perf_log(
             jit_allocated_bytes,
             jit_cache_resets,
             jit_freed_blocks,
-            jit_freed_bytes
+            jit_freed_bytes,
+            gpu3d_process_count,
+            gpu3d_process_us,
+            gpu3d_process_max_us,
+            gpu3d_vram_wait_us,
+            gpu3d_vram_wait_max_us,
+            gpu3d_tex_cache_us,
+            gpu3d_tex_cache_max_us,
+            tex_dirty_marks,
+            tex_rebuilds,
+            tex_new_builds,
+            tex_evictions,
+            tex_build_us,
+            tex_build_max_us
         );
     }
 }
@@ -507,6 +539,19 @@ fn append_overlay_perf_log(
     _jit_cache_resets: u32,
     _jit_freed_blocks: u32,
     _jit_freed_bytes: u32,
+    _gpu3d_process_count: u32,
+    _gpu3d_process_us: u32,
+    _gpu3d_process_max_us: u32,
+    _gpu3d_vram_wait_us: u32,
+    _gpu3d_vram_wait_max_us: u32,
+    _gpu3d_tex_cache_us: u32,
+    _gpu3d_tex_cache_max_us: u32,
+    _tex_dirty_marks: u32,
+    _tex_rebuilds: u32,
+    _tex_new_builds: u32,
+    _tex_evictions: u32,
+    _tex_build_us: u32,
+    _tex_build_max_us: u32,
 ) {}
 
 unsafe extern "C" fn fs_clear_overlay_image_hook() {
@@ -527,6 +572,19 @@ unsafe extern "C" fn fs_clear_overlay_image_hook() {
     let jit_cache_resets = JIT_ARM9_CACHE_RESET_COUNT.swap(0, Ordering::Relaxed);
     let jit_freed_blocks = JIT_ARM9_CACHE_FREED_BLOCKS.swap(0, Ordering::Relaxed);
     let jit_freed_bytes = JIT_ARM9_CACHE_FREED_BYTES.swap(0, Ordering::Relaxed);
+    let gpu3d_process_count = GPU3D_PROCESS_COUNT.swap(0, Ordering::Relaxed);
+    let gpu3d_process_us = GPU3D_PROCESS_US.swap(0, Ordering::Relaxed);
+    let gpu3d_process_max_us = GPU3D_PROCESS_MAX_US.swap(0, Ordering::Relaxed);
+    let gpu3d_vram_wait_us = GPU3D_VRAM_WAIT_US.swap(0, Ordering::Relaxed);
+    let gpu3d_vram_wait_max_us = GPU3D_VRAM_WAIT_MAX_US.swap(0, Ordering::Relaxed);
+    let gpu3d_tex_cache_us = GPU3D_TEX_CACHE_US.swap(0, Ordering::Relaxed);
+    let gpu3d_tex_cache_max_us = GPU3D_TEX_CACHE_MAX_US.swap(0, Ordering::Relaxed);
+    let tex_dirty_marks = TEX_DIRTY_MARKS.swap(0, Ordering::Relaxed);
+    let tex_rebuilds = TEX_REBUILDS.swap(0, Ordering::Relaxed);
+    let tex_new_builds = TEX_NEW_BUILDS.swap(0, Ordering::Relaxed);
+    let tex_evictions = TEX_EVICTIONS.swap(0, Ordering::Relaxed);
+    let tex_build_us = TEX_BUILD_US.swap(0, Ordering::Relaxed);
+    let tex_build_max_us = TEX_BUILD_MAX_US.swap(0, Ordering::Relaxed);
     OVERLAY_HOOK_INVALIDATED_COUNT.store(0, Ordering::Relaxed);
 
     asm.emu.jit.invalidate_blocks(overlay_info_header.ram_address, overlay_info_header.total_size() as usize);
@@ -547,6 +605,19 @@ unsafe extern "C" fn fs_clear_overlay_image_hook() {
         jit_cache_resets,
         jit_freed_blocks,
         jit_freed_bytes,
+        gpu3d_process_count,
+        gpu3d_process_us,
+        gpu3d_process_max_us,
+        gpu3d_vram_wait_us,
+        gpu3d_vram_wait_max_us,
+        gpu3d_tex_cache_us,
+        gpu3d_tex_cache_max_us,
+        tex_dirty_marks,
+        tex_rebuilds,
+        tex_new_builds,
+        tex_evictions,
+        tex_build_us,
+        tex_build_max_us,
     );
 }
 
