@@ -469,6 +469,8 @@ unsafe extern "C" fn fs_clear_overlay_image_hook() {
 
     let overlay_info_header: &cartridge_io::FsOverlayInfoHeader = mem::transmute(asm.emu.mem.shm.as_ptr().add(shm_offset));
 
+    crate::perf_diag::set_overlay_event_id(overlay_info_header.id);
+
     asm.emu.jit.invalidate_blocks(overlay_info_header.ram_address, overlay_info_header.total_size() as usize);
     asm.emu
         .jit
