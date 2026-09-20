@@ -22,11 +22,32 @@ use std::hint::{assert_unchecked, unreachable_unchecked};
 use std::intrinsics::unlikely;
 use std::mem::{self, MaybeUninit};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::Instant;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
 const UPSCALE_FACTORS: [f32; 8] = [1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75];
+
+pub static GPU3D_PROCESS_COUNT: AtomicU32 = AtomicU32::new(0);
+pub static GPU3D_PROCESS_US: AtomicU32 = AtomicU32::new(0);
+pub static GPU3D_PROCESS_MAX_US: AtomicU32 = AtomicU32::new(0);
+pub static GPU3D_VRAM_WAIT_US: AtomicU32 = AtomicU32::new(0);
+pub static GPU3D_VRAM_WAIT_MAX_US: AtomicU32 = AtomicU32::new(0);
+pub static GPU3D_TEX_CACHE_US: AtomicU32 = AtomicU32::new(0);
+pub static GPU3D_TEX_CACHE_MAX_US: AtomicU32 = AtomicU32::new(0);
+
+#[inline]
+fn perf_add_max(total: &AtomicU32, max: &AtomicU32, micros: u32) {
+    total.fetch_add(micros, Ordering::Relaxed);
+    let mut old = max.load(Ordering::Relaxed);
+    while micros > old {
+        match max.compare_exchange_weak(old, micros, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(current) => old = current,
+        }
+    }
+}
 
 #[repr(u8)]
 #[derive(Copy, Clone, EnumIter, Eq, PartialEq)]
@@ -776,12 +797,25 @@ impl Gpu3DRenderer {
             return;
         }
 
+        let process_start = Instant::now();
+
         self.process_vertices();
         self.assemble_draws();
         self.buffer.vertices_count = 0;
 
+        let wait_start = Instant::now();
         while !self.vram_ready.load(Ordering::SeqCst) {}
+        let wait_us = wait_start.elapsed().as_micros().min(u32::MAX as u128) as u32;
+        perf_add_max(&GPU3D_VRAM_WAIT_US, &GPU3D_VRAM_WAIT_MAX_US, wait_us);
+
+        let tex_start = Instant::now();
         self.populate_tex_cache(&mut common.mem_buf, mem_refs);
+        let tex_us = tex_start.elapsed().as_micros().min(u32::MAX as u128) as u32;
+        perf_add_max(&GPU3D_TEX_CACHE_US, &GPU3D_TEX_CACHE_MAX_US, tex_us);
+
+        let process_us = process_start.elapsed().as_micros().min(u32::MAX as u128) as u32;
+        GPU3D_PROCESS_COUNT.fetch_add(1, Ordering::Relaxed);
+        perf_add_max(&GPU3D_PROCESS_US, &GPU3D_PROCESS_MAX_US, process_us);
     }
 
     pub fn on_render_start(&self) {
