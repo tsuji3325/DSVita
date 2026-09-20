@@ -1,6 +1,11 @@
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 const SLOW_FRAME_US: u32 = 40_000;
+const PC_BUCKET_SIZE: u32 = 0x40;
+const NO_OVERLAY: u32 = u32::MAX;
 
 const CPU_FRAME_COUNT: usize = 0;
 const CPU_FRAME_US: usize = 1;
@@ -55,6 +60,25 @@ const SLOW_OTHER_RENDER_US: usize = 44;
 const STAT_COUNT: usize = 45;
 static STATS: [AtomicU32; STAT_COUNT] = [const { AtomicU32::new(0) }; STAT_COUNT];
 
+static CURRENT_ARM9_PC: AtomicU32 = AtomicU32::new(0);
+static LAST_OVERLAY_EVENT_ID: AtomicU32 = AtomicU32::new(NO_OVERLAY);
+static CURRENT_FRAME_ID: AtomicU32 = AtomicU32::new(1);
+static LAST_COMPLETED_FRAME_ID: AtomicU32 = AtomicU32::new(0);
+static LAST_COMPLETED_FRAME_SLOW: AtomicBool = AtomicBool::new(false);
+
+static ALL_PC_SAMPLES: OnceLock<Mutex<BTreeMap<u64, u32>>> = OnceLock::new();
+static SLOW_PC_SAMPLES: OnceLock<Mutex<BTreeMap<u64, u32>>> = OnceLock::new();
+
+#[inline]
+fn sample_map_all() -> &'static Mutex<BTreeMap<u64, u32>> {
+    ALL_PC_SAMPLES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+#[inline]
+fn sample_map_slow() -> &'static Mutex<BTreeMap<u64, u32>> {
+    SLOW_PC_SAMPLES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
 #[inline]
 fn add(index: usize, value: u32) {
     STATS[index].fetch_add(value, Ordering::Relaxed);
@@ -71,9 +95,81 @@ fn update_max(index: usize, value: u32) {
     }
 }
 
+#[inline]
+fn sample_key(pc: u32, overlay_hint: u32) -> u64 {
+    let bucket = pc & !(PC_BUCKET_SIZE - 1);
+    ((overlay_hint as u64) << 32) | bucket as u64
+}
+
+fn merge_histogram(target: &Mutex<BTreeMap<u64, u32>>, source: &BTreeMap<u64, u32>) {
+    let mut target = target.lock().unwrap();
+    for (&key, &count) in source {
+        *target.entry(key).or_insert(0) += count;
+    }
+}
+
 pub(crate) fn reset() {
     for stat in &STATS {
         stat.store(0, Ordering::Relaxed);
+    }
+    CURRENT_ARM9_PC.store(0, Ordering::Relaxed);
+    LAST_OVERLAY_EVENT_ID.store(NO_OVERLAY, Ordering::Relaxed);
+    CURRENT_FRAME_ID.store(1, Ordering::Relaxed);
+    LAST_COMPLETED_FRAME_ID.store(0, Ordering::Relaxed);
+    LAST_COMPLETED_FRAME_SLOW.store(false, Ordering::Relaxed);
+    sample_map_all().lock().unwrap().clear();
+    sample_map_slow().lock().unwrap().clear();
+}
+
+#[inline]
+pub(crate) fn publish_arm9_pc(pc: u32) {
+    CURRENT_ARM9_PC.store(pc, Ordering::Relaxed);
+}
+
+#[inline]
+pub(crate) fn clear_arm9_pc() {
+    CURRENT_ARM9_PC.store(0, Ordering::Relaxed);
+}
+
+#[inline]
+pub(crate) fn set_overlay_event_id(id: u32) {
+    LAST_OVERLAY_EVENT_ID.store(id, Ordering::Relaxed);
+}
+
+pub(crate) fn run_arm9_sampler(active: Arc<AtomicBool>) {
+    let mut frame_id = CURRENT_FRAME_ID.load(Ordering::Acquire);
+    let mut frame_samples = BTreeMap::<u64, u32>::new();
+
+    while active.load(Ordering::Relaxed) {
+        let observed_frame_id = CURRENT_FRAME_ID.load(Ordering::Acquire);
+        if observed_frame_id != frame_id {
+            let completed_id = LAST_COMPLETED_FRAME_ID.load(Ordering::Acquire);
+            let completed_slow = LAST_COMPLETED_FRAME_SLOW.load(Ordering::Relaxed);
+            if completed_id == frame_id && completed_slow {
+                merge_histogram(sample_map_slow(), &frame_samples);
+            }
+            frame_samples.clear();
+            frame_id = observed_frame_id;
+        }
+
+        let pc = CURRENT_ARM9_PC.load(Ordering::Relaxed);
+        if pc != 0 {
+            let overlay_hint = LAST_OVERLAY_EVENT_ID.load(Ordering::Relaxed);
+            let key = sample_key(pc, overlay_hint);
+            *frame_samples.entry(key).or_insert(0) += 1;
+            {
+                let mut all = sample_map_all().lock().unwrap();
+                *all.entry(key).or_insert(0) += 1;
+            }
+        }
+
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    let completed_id = LAST_COMPLETED_FRAME_ID.load(Ordering::Acquire);
+    let completed_slow = LAST_COMPLETED_FRAME_SLOW.load(Ordering::Relaxed);
+    if completed_id == frame_id && completed_slow {
+        merge_histogram(sample_map_slow(), &frame_samples);
     }
 }
 
@@ -99,13 +195,21 @@ pub(crate) fn record_cpu_frame_interval(micros: u32) {
     add(CPU_FRAME_US, micros);
     update_max(CPU_FRAME_MAX_US, micros);
 
-    if micros >= SLOW_FRAME_US {
+    let slow = micros >= SLOW_FRAME_US;
+    if slow {
         add(CPU_SLOW_COUNT, 1);
         add(CPU_SLOW_US, micros);
         update_max(CPU_SLOW_MAX_US, micros);
         add(CPU_SLOW_ROM_MISSES, frame_rom_misses);
         add(CPU_SLOW_ROM_US, frame_rom_us);
     }
+
+    // Publish completion metadata before advancing the frame id. The sampler's
+    // Acquire load of CURRENT_FRAME_ID then sees a fully classified prior frame.
+    let frame_id = CURRENT_FRAME_ID.load(Ordering::Relaxed);
+    LAST_COMPLETED_FRAME_SLOW.store(slow, Ordering::Relaxed);
+    LAST_COMPLETED_FRAME_ID.store(frame_id, Ordering::Relaxed);
+    CURRENT_FRAME_ID.store(frame_id.wrapping_add(1), Ordering::Release);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -172,26 +276,56 @@ fn avg(total: u32, count: u32) -> u32 {
     if count == 0 { 0 } else { total / count }
 }
 
+fn top_samples(map: &Mutex<BTreeMap<u64, u32>>, limit: usize) -> (u32, String) {
+    let map = map.lock().unwrap();
+    let total = map.values().copied().sum::<u32>();
+    let mut entries = map.iter().map(|(&key, &count)| (key, count)).collect::<Vec<_>>();
+    entries.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+    let mut out = String::new();
+    for (rank, (key, count)) in entries.into_iter().take(limit).enumerate() {
+        let overlay = (key >> 32) as u32;
+        let pc = key as u32;
+        let overlay_text = if overlay == NO_OVERLAY { "none".to_string() } else { overlay.to_string() };
+        let per_mille = if total == 0 { 0 } else { count.saturating_mul(1000) / total };
+        out.push_str(&format!(
+            "{} overlay_hint={} pc_bucket=0x{:08X}-0x{:08X} samples={} permille={}\n",
+            rank + 1,
+            overlay_text,
+            pc,
+            pc + PC_BUCKET_SIZE - 1,
+            count,
+            per_mille,
+        ));
+    }
+    (total, out)
+}
+
 pub(crate) fn write_report() {
     let cpu_frames = get(CPU_FRAME_COUNT);
     let cpu_slow = get(CPU_SLOW_COUNT);
     let render_frames = get(RENDER_FRAME_COUNT);
     let ready_slow = get(READY_WAIT_SLOW_COUNT);
     let render_slow = get(RENDER_SLOW_COUNT);
+    let (all_pc_samples, all_pc_top) = top_samples(sample_map_all(), 24);
+    let (slow_pc_samples, slow_pc_top) = top_samples(sample_map_slow(), 24);
 
-    let report = format!(
+    let mut report = format!(
         concat!(
-            "report_version=1\n",
-            "slow_threshold_us={}\n",
+            "report_version=2\n",
+            "slow_threshold_us={} pc_sample_interval_ms=1 pc_bucket_size={} overlay_hint_note=last_FS_ClearOverlayImage_event_not_ownership\n",
             "cpu_frames={} cpu_avg_us={} cpu_max_us={} cpu_slow_frames={} cpu_slow_avg_us={} cpu_slow_max_us={}\n",
             "rom_page_misses={} rom_read_total_us={} rom_read_max_us={} slow_frame_rom_misses={} slow_frame_rom_read_us={}\n",
             "render_frames={} ready_wait_avg_us={} ready_wait_max_us={} ready_wait_slow_frames={} ready_wait_slow_avg_us={} ready_wait_slow_max_us={}\n",
             "render_work_avg_us={} render_work_max_us={} render_slow_frames={} render_slow_avg_us={} render_slow_max_us={}\n",
             "all_vram_prep_us={} all_vram_prep_max_us={} all_vram_2d_us={} all_vram_2d_max_us={} all_vram_3d_us={} all_vram_3d_max_us={}\n",
             "all_draw_2d_us={} all_draw_2d_max_us={} all_wait_3d_us={} all_wait_3d_max_us={} all_render_3d_us={} all_render_3d_max_us={} all_other_render_us={} all_other_render_max_us={}\n",
-            "slow_vram_prep_us={} slow_vram_2d_us={} slow_vram_3d_us={} slow_draw_2d_us={} slow_wait_3d_us={} slow_render_3d_us={} slow_other_render_us={}\n"
+            "slow_vram_prep_us={} slow_vram_2d_us={} slow_vram_3d_us={} slow_draw_2d_us={} slow_wait_3d_us={} slow_render_3d_us={} slow_other_render_us={}\n",
+            "all_pc_samples={} slow_pc_samples={}\n",
+            "[top_slow_pc_buckets]\n"
         ),
         SLOW_FRAME_US,
+        PC_BUCKET_SIZE,
         cpu_frames,
         avg(get(CPU_FRAME_US), cpu_frames),
         get(CPU_FRAME_MAX_US),
@@ -235,7 +369,13 @@ pub(crate) fn write_report() {
         get(SLOW_WAIT_3D_US),
         get(SLOW_RENDER_3D_US),
         get(SLOW_OTHER_RENDER_US),
+        all_pc_samples,
+        slow_pc_samples,
     );
+
+    report.push_str(&slow_pc_top);
+    report.push_str("[top_all_pc_buckets]\n");
+    report.push_str(&all_pc_top);
 
     #[cfg(target_os = "vita")]
     {
