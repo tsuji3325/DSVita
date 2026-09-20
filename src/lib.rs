@@ -548,6 +548,17 @@ pub fn actual_main() {
         cpu_active.store(true, Ordering::SeqCst);
 
         let cpu_active_clone = cpu_active.clone();
+        let perf_sampler_thread = thread::Builder::new()
+            .name("perf_sampler".to_owned())
+            .spawn(move || {
+                if cfg!(target_os = "vita") {
+                    set_thread_prio_affinity(ThreadPriority::Low, &[ThreadAffinity::Core3]);
+                }
+                perf_diag::run_arm9_sampler(cpu_active_clone);
+            })
+            .unwrap();
+
+        let cpu_active_clone = cpu_active.clone();
         let process_3d_thread = thread::Builder::new()
             .name("process_3d_thread".to_owned())
             .spawn(move || {
@@ -784,6 +795,7 @@ pub fn actual_main() {
 
         cpu_thread.join().unwrap();
         cpu_active.store(false, Ordering::SeqCst);
+        perf_sampler_thread.join().unwrap();
         audio_out_thread.join().unwrap();
         audio_in_thread.join().unwrap();
         if let Some(process_streams) = process_streams {
