@@ -3,9 +3,6 @@ use crate::core::graphics::gpu::{PowCnt1, DISPLAY_HEIGHT, DISPLAY_WIDTH};
 use crate::core::graphics::gpu_3d::registers_3d::{Gpu3DBuffer, Gpu3DRegisters, PolygonAttr, PolygonMode, PrimitiveType, TexImageParam, TextureCoordTransMode, TextureFormat, Vertex, Viewport};
 use crate::core::graphics::gpu_3d::registers_3d::{POLYGON_LIMIT, VERTEX_LIMIT};
 use crate::core::graphics::gpu_3d::texture_cache::{Texture3D, Texture3DCache};
-pub use crate::core::graphics::gpu_3d::texture_cache::{
-    TEX_BUILD_MAX_US, TEX_BUILD_US, TEX_DIRTY_MARKS, TEX_EVICTIONS, TEX_NEW_BUILDS, TEX_REBUILDS, TEX_UPLOAD_COUNT, TEX_UPLOAD_MAX_US, TEX_UPLOAD_US,
-};
 use crate::core::graphics::gpu_mem_buf::{GpuMemBuf, GpuMemRefs};
 use crate::core::graphics::gpu_renderer::GpuRendererCommon;
 use crate::core::graphics::gpu_shaders::{Gpu3DShaderDepthPrograms, Gpu3DShaderPrograms, GpuShadersPrograms};
@@ -25,36 +22,11 @@ use std::hint::{assert_unchecked, unreachable_unchecked};
 use std::intrinsics::unlikely;
 use std::mem::{self, MaybeUninit};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
 const UPSCALE_FACTORS: [f32; 8] = [1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75];
-
-pub static GPU3D_PROCESS_COUNT: AtomicU32 = AtomicU32::new(0);
-pub static GPU3D_PROCESS_US: AtomicU32 = AtomicU32::new(0);
-pub static GPU3D_PROCESS_MAX_US: AtomicU32 = AtomicU32::new(0);
-pub static GPU3D_VRAM_WAIT_US: AtomicU32 = AtomicU32::new(0);
-pub static GPU3D_VRAM_WAIT_MAX_US: AtomicU32 = AtomicU32::new(0);
-pub static GPU3D_TEX_CACHE_US: AtomicU32 = AtomicU32::new(0);
-pub static GPU3D_TEX_CACHE_MAX_US: AtomicU32 = AtomicU32::new(0);
-pub static GPU3D_VERTICES_US: AtomicU32 = AtomicU32::new(0);
-pub static GPU3D_VERTICES_MAX_US: AtomicU32 = AtomicU32::new(0);
-pub static GPU3D_ASSEMBLE_US: AtomicU32 = AtomicU32::new(0);
-pub static GPU3D_ASSEMBLE_MAX_US: AtomicU32 = AtomicU32::new(0);
-
-#[inline]
-fn perf_add_max(total: &AtomicU32, max: &AtomicU32, micros: u32) {
-    total.fetch_add(micros, Ordering::Relaxed);
-    let mut old = max.load(Ordering::Relaxed);
-    while micros > old {
-        match max.compare_exchange_weak(old, micros, Ordering::Relaxed, Ordering::Relaxed) {
-            Ok(_) => break,
-            Err(current) => old = current,
-        }
-    }
-}
 
 #[repr(u8)]
 #[derive(Copy, Clone, EnumIter, Eq, PartialEq)]
@@ -804,33 +776,12 @@ impl Gpu3DRenderer {
             return;
         }
 
-        let process_start = Instant::now();
-
-        let vertices_start = Instant::now();
         self.process_vertices();
-        let vertices_us = vertices_start.elapsed().as_micros().min(u32::MAX as u128) as u32;
-        perf_add_max(&GPU3D_VERTICES_US, &GPU3D_VERTICES_MAX_US, vertices_us);
-
-        let assemble_start = Instant::now();
         self.assemble_draws();
-        let assemble_us = assemble_start.elapsed().as_micros().min(u32::MAX as u128) as u32;
-        perf_add_max(&GPU3D_ASSEMBLE_US, &GPU3D_ASSEMBLE_MAX_US, assemble_us);
-
         self.buffer.vertices_count = 0;
 
-        let wait_start = Instant::now();
         while !self.vram_ready.load(Ordering::SeqCst) {}
-        let wait_us = wait_start.elapsed().as_micros().min(u32::MAX as u128) as u32;
-        perf_add_max(&GPU3D_VRAM_WAIT_US, &GPU3D_VRAM_WAIT_MAX_US, wait_us);
-
-        let tex_start = Instant::now();
         self.populate_tex_cache(&mut common.mem_buf, mem_refs);
-        let tex_us = tex_start.elapsed().as_micros().min(u32::MAX as u128) as u32;
-        perf_add_max(&GPU3D_TEX_CACHE_US, &GPU3D_TEX_CACHE_MAX_US, tex_us);
-
-        let process_us = process_start.elapsed().as_micros().min(u32::MAX as u128) as u32;
-        GPU3D_PROCESS_COUNT.fetch_add(1, Ordering::Relaxed);
-        perf_add_max(&GPU3D_PROCESS_US, &GPU3D_PROCESS_MAX_US, process_us);
     }
 
     pub fn on_render_start(&self) {
