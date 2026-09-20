@@ -3,7 +3,9 @@ use crate::core::graphics::gpu::{PowCnt1, DISPLAY_HEIGHT, DISPLAY_WIDTH};
 use crate::core::graphics::gpu_3d::registers_3d::{Gpu3DBuffer, Gpu3DRegisters, PolygonAttr, PolygonMode, PrimitiveType, TexImageParam, TextureCoordTransMode, TextureFormat, Vertex, Viewport};
 use crate::core::graphics::gpu_3d::registers_3d::{POLYGON_LIMIT, VERTEX_LIMIT};
 use crate::core::graphics::gpu_3d::texture_cache::{Texture3D, Texture3DCache};
-pub use crate::core::graphics::gpu_3d::texture_cache::{TEX_BUILD_MAX_US, TEX_BUILD_US, TEX_DIRTY_MARKS, TEX_EVICTIONS, TEX_NEW_BUILDS, TEX_REBUILDS};
+pub use crate::core::graphics::gpu_3d::texture_cache::{
+    TEX_BUILD_MAX_US, TEX_BUILD_US, TEX_DIRTY_MARKS, TEX_EVICTIONS, TEX_NEW_BUILDS, TEX_REBUILDS, TEX_UPLOAD_COUNT, TEX_UPLOAD_MAX_US, TEX_UPLOAD_US,
+};
 use crate::core::graphics::gpu_mem_buf::{GpuMemBuf, GpuMemRefs};
 use crate::core::graphics::gpu_renderer::GpuRendererCommon;
 use crate::core::graphics::gpu_shaders::{Gpu3DShaderDepthPrograms, Gpu3DShaderPrograms, GpuShadersPrograms};
@@ -37,6 +39,8 @@ pub static GPU3D_VRAM_WAIT_US: AtomicU32 = AtomicU32::new(0);
 pub static GPU3D_VRAM_WAIT_MAX_US: AtomicU32 = AtomicU32::new(0);
 pub static GPU3D_TEX_CACHE_US: AtomicU32 = AtomicU32::new(0);
 pub static GPU3D_TEX_CACHE_MAX_US: AtomicU32 = AtomicU32::new(0);
+pub static GPU3D_VERTICES_US: AtomicU32 = AtomicU32::new(0);
+pub static GPU3D_VERTICES_MAX_US: AtomicU32 = AtomicU32::new(0);
 
 #[inline]
 fn perf_add_max(total: &AtomicU32, max: &AtomicU32, micros: u32) {
@@ -800,9 +804,12 @@ impl Gpu3DRenderer {
 
         let process_start = Instant::now();
 
+        let vertices_start = Instant::now();
         self.process_vertices();
         self.assemble_draws();
         self.buffer.vertices_count = 0;
+        let vertices_us = vertices_start.elapsed().as_micros().min(u32::MAX as u128) as u32;
+        perf_add_max(&GPU3D_VERTICES_US, &GPU3D_VERTICES_MAX_US, vertices_us);
 
         let wait_start = Instant::now();
         while !self.vram_ready.load(Ordering::SeqCst) {}
