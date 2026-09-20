@@ -5,8 +5,9 @@ use crate::core::graphics::gpu_3d::renderer_3d::{
     TEX_UPLOAD_COUNT, TEX_UPLOAD_MAX_US, TEX_UPLOAD_US,
 };
 use crate::core::graphics::gpu_renderer::{
-    VRAM_CAPTURE_INSERT_MAX_US, VRAM_CAPTURE_INSERT_US, VRAM_DIRTY_COPY_MAX_US, VRAM_DIRTY_COPY_US, VRAM_MAP_REBUILD_MAX_US, VRAM_MAP_REBUILD_US, VRAM_READ_2D_A_US, VRAM_READ_2D_B_US,
-    VRAM_READ_3D_US, VRAM_READ_ALL_MAX_US, VRAM_READ_ALL_US, VRAM_READ_LCDC_US,
+    VRAM_CAPTURE_INSERT_MAX_US, VRAM_CAPTURE_INSERT_US, VRAM_DIRTY_COPY_MAX_US, VRAM_DIRTY_COPY_US, VRAM_FULL_READ_COUNT, VRAM_MAP_REBUILD_MAX_US, VRAM_MAP_REBUILD_US,
+    VRAM_MAPPING_CHANGE_COUNT, VRAM_PARTIAL_COPIED_BYTES, VRAM_PARTIAL_READ_COUNT, VRAM_READ_2D_A_US, VRAM_READ_2D_B_US, VRAM_READ_3D_US, VRAM_READ_ALL_MAX_US, VRAM_READ_ALL_US,
+    VRAM_READ_LCDC_US,
 };
 use crate::core::memory::regions::{self, OAM_OFFSET};
 use crate::core::CpuType::ARM9;
@@ -514,6 +515,10 @@ fn append_overlay_perf_log(
     vram_read_2d_a_us: u32,
     vram_read_2d_b_us: u32,
     vram_read_3d_us: u32,
+    vram_full_read_count: u32,
+    vram_partial_read_count: u32,
+    vram_partial_copied_bytes: u32,
+    vram_mapping_change_count: u32,
 ) {
     use std::io::Write;
 
@@ -521,7 +526,7 @@ fn append_overlay_perf_log(
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("ux0:data/dsvita/overlay_perf.log") {
         let _ = writeln!(
             file,
-            "overlay id={} addr={:08x} size={} compiled_since_prev={} write_invalidations={} hook_invalidated_pages={} jit_allocated_bytes={} jit_cache_resets={} jit_freed_blocks={} jit_freed_bytes={} gpu3d_process_count={} gpu3d_process_us={} gpu3d_process_max_us={} gpu3d_vertices_us={} gpu3d_vertices_max_us={} gpu3d_assemble_us={} gpu3d_assemble_max_us={} gpu3d_vram_wait_us={} gpu3d_vram_wait_max_us={} gpu3d_tex_cache_us={} gpu3d_tex_cache_max_us={} tex_dirty_marks={} tex_rebuilds={} tex_new_builds={} tex_evictions={} tex_build_us={} tex_build_max_us={} tex_upload_count={} tex_upload_us={} tex_upload_max_us={} vram_dirty_copy_us={} vram_dirty_copy_max_us={} vram_map_rebuild_us={} vram_map_rebuild_max_us={} vram_capture_insert_us={} vram_capture_insert_max_us={} vram_read_all_us={} vram_read_all_max_us={} vram_read_lcdc_us={} vram_read_2d_a_us={} vram_read_2d_b_us={} vram_read_3d_us={}",
+            "overlay id={} addr={:08x} size={} compiled_since_prev={} write_invalidations={} hook_invalidated_pages={} jit_allocated_bytes={} jit_cache_resets={} jit_freed_blocks={} jit_freed_bytes={} gpu3d_process_count={} gpu3d_process_us={} gpu3d_process_max_us={} gpu3d_vertices_us={} gpu3d_vertices_max_us={} gpu3d_assemble_us={} gpu3d_assemble_max_us={} gpu3d_vram_wait_us={} gpu3d_vram_wait_max_us={} gpu3d_tex_cache_us={} gpu3d_tex_cache_max_us={} tex_dirty_marks={} tex_rebuilds={} tex_new_builds={} tex_evictions={} tex_build_us={} tex_build_max_us={} tex_upload_count={} tex_upload_us={} tex_upload_max_us={} vram_dirty_copy_us={} vram_dirty_copy_max_us={} vram_map_rebuild_us={} vram_map_rebuild_max_us={} vram_capture_insert_us={} vram_capture_insert_max_us={} vram_read_all_us={} vram_read_all_max_us={} vram_read_lcdc_us={} vram_read_2d_a_us={} vram_read_2d_b_us={} vram_read_3d_us={} vram_full_read_count={} vram_partial_read_count={} vram_partial_copied_bytes={} vram_mapping_change_count={}",
             id,
             ram_address,
             total_size,
@@ -563,7 +568,11 @@ fn append_overlay_perf_log(
             vram_read_lcdc_us,
             vram_read_2d_a_us,
             vram_read_2d_b_us,
-            vram_read_3d_us
+            vram_read_3d_us,
+            vram_full_read_count,
+            vram_partial_read_count,
+            vram_partial_copied_bytes,
+            vram_mapping_change_count
         );
     }
 }
@@ -612,6 +621,10 @@ fn append_overlay_perf_log(
     _vram_read_2d_a_us: u32,
     _vram_read_2d_b_us: u32,
     _vram_read_3d_us: u32,
+    _vram_full_read_count: u32,
+    _vram_partial_read_count: u32,
+    _vram_partial_copied_bytes: u32,
+    _vram_mapping_change_count: u32,
 ) {}
 
 unsafe extern "C" fn fs_clear_overlay_image_hook() {
@@ -664,6 +677,10 @@ unsafe extern "C" fn fs_clear_overlay_image_hook() {
     let vram_read_2d_a_us = VRAM_READ_2D_A_US.swap(0, Ordering::Relaxed);
     let vram_read_2d_b_us = VRAM_READ_2D_B_US.swap(0, Ordering::Relaxed);
     let vram_read_3d_us = VRAM_READ_3D_US.swap(0, Ordering::Relaxed);
+    let vram_full_read_count = VRAM_FULL_READ_COUNT.swap(0, Ordering::Relaxed);
+    let vram_partial_read_count = VRAM_PARTIAL_READ_COUNT.swap(0, Ordering::Relaxed);
+    let vram_partial_copied_bytes = VRAM_PARTIAL_COPIED_BYTES.swap(0, Ordering::Relaxed);
+    let vram_mapping_change_count = VRAM_MAPPING_CHANGE_COUNT.swap(0, Ordering::Relaxed);
     OVERLAY_HOOK_INVALIDATED_COUNT.store(0, Ordering::Relaxed);
 
     asm.emu.jit.invalidate_blocks(overlay_info_header.ram_address, overlay_info_header.total_size() as usize);
@@ -716,6 +733,10 @@ unsafe extern "C" fn fs_clear_overlay_image_hook() {
         vram_read_2d_a_us,
         vram_read_2d_b_us,
         vram_read_3d_us,
+        vram_full_read_count,
+        vram_partial_read_count,
+        vram_partial_copied_bytes,
+        vram_mapping_change_count,
     );
 }
 
