@@ -152,17 +152,12 @@ impl GpuMemBuf {
         VRAM_READ_2D_A_US.fetch_add(start.elapsed().as_micros().min(u32::MAX as u128) as u32, Ordering::Relaxed);
 
         let start = Instant::now();
-        if mapping_changed {
-            self.vram.maps.read_bg_b(&mut refs.bg_b, &self.vram_banks.mem);
-            self.vram.maps.read_all_obj_b(&mut refs.obj_b, &self.vram_banks.mem);
-            self.vram.maps.read_all_bg_b_ext_palette(&mut refs.bg_b_ext_pal, &self.vram_banks.mem);
-            self.vram.maps.read_all_obj_b_ext_palette(&mut refs.obj_b_ext_pal, &self.vram_banks.mem);
-        } else {
-            partial_copied_bytes += self.vram.maps.read_dirty_bg_b(&mut refs.bg_b, &self.vram_banks.mem, &dirty_sections);
-            partial_copied_bytes += self.vram.maps.read_dirty_obj_b(&mut refs.obj_b, &self.vram_banks.mem, &dirty_sections);
-            partial_copied_bytes += self.vram.maps.read_dirty_bg_b_ext_palette(&mut refs.bg_b_ext_pal, &self.vram_banks.mem, &dirty_sections);
-            partial_copied_bytes += self.vram.maps.read_dirty_obj_b_ext_palette(&mut refs.obj_b_ext_pal, &self.vram_banks.mem, &dirty_sections);
-        }
+        // Safety diagnostic: keep Engine B on the original full-refresh path.
+        // HeartGold's lower/menu screen showed corruption when B used dirty-only refreshes.
+        self.vram.maps.read_bg_b(&mut refs.bg_b, &self.vram_banks.mem);
+        self.vram.maps.read_all_obj_b(&mut refs.obj_b, &self.vram_banks.mem);
+        self.vram.maps.read_all_bg_b_ext_palette(&mut refs.bg_b_ext_pal, &self.vram_banks.mem);
+        self.vram.maps.read_all_obj_b_ext_palette(&mut refs.obj_b_ext_pal, &self.vram_banks.mem);
         refs.pal_b.copy_from_slice(&self.pal[regions::STANDARD_PALETTES_SIZE as usize / 2..]);
         refs.oam_b.copy_from_slice(&self.oam[regions::OAM_SIZE as usize / 2..]);
         VRAM_READ_2D_B_US.fetch_add(start.elapsed().as_micros().min(u32::MAX as u128) as u32, Ordering::Relaxed);
