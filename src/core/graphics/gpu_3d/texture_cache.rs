@@ -24,7 +24,6 @@ use std::collections::HashMap;
 use std::hint::{assert_unchecked, unreachable_unchecked};
 use std::mem;
 use std::mem::MaybeUninit;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 use xxhash_rust::xxh32::xxh32;
 
@@ -482,7 +481,6 @@ impl Texture3D {
 
     pub unsafe fn get_texture_id(&mut self) -> GLuint {
         if self.texture_id == u32::MAX {
-            let upload_start = Instant::now();
             let mut tex = 0;
             gl::GenTextures(1, &mut tex);
             gl::BindTexture(gl::TEXTURE_2D, tex);
@@ -503,16 +501,6 @@ impl Texture3D {
             gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE as _);
             gl::BindTexture(gl::TEXTURE_2D, 0);
 
-            let upload_us = upload_start.elapsed().as_micros().min(u32::MAX as u128) as u32;
-            TEX_UPLOAD_COUNT.fetch_add(1, Ordering::Relaxed);
-            TEX_UPLOAD_US.fetch_add(upload_us, Ordering::Relaxed);
-            let mut old = TEX_UPLOAD_MAX_US.load(Ordering::Relaxed);
-            while upload_us > old {
-                match TEX_UPLOAD_MAX_US.compare_exchange_weak(old, upload_us, Ordering::Relaxed, Ordering::Relaxed) {
-                    Ok(_) => break,
-                    Err(current) => old = current,
-                }
-            }
 
             self.texture_id = tex;
             self.data.destroy();
@@ -601,28 +589,6 @@ impl Texture3D {
 
 const CACHE_SIZE_LIMIT: u32 = 16 * 1024 * 1024;
 
-pub static TEX_DIRTY_MARKS: AtomicU32 = AtomicU32::new(0);
-pub static TEX_REBUILDS: AtomicU32 = AtomicU32::new(0);
-pub static TEX_NEW_BUILDS: AtomicU32 = AtomicU32::new(0);
-pub static TEX_EVICTIONS: AtomicU32 = AtomicU32::new(0);
-pub static TEX_BUILD_US: AtomicU32 = AtomicU32::new(0);
-pub static TEX_BUILD_MAX_US: AtomicU32 = AtomicU32::new(0);
-pub static TEX_UPLOAD_COUNT: AtomicU32 = AtomicU32::new(0);
-pub static TEX_UPLOAD_US: AtomicU32 = AtomicU32::new(0);
-pub static TEX_UPLOAD_MAX_US: AtomicU32 = AtomicU32::new(0);
-
-#[inline]
-fn perf_add_build_time(micros: u32) {
-    TEX_BUILD_US.fetch_add(micros, Ordering::Relaxed);
-    let mut old = TEX_BUILD_MAX_US.load(Ordering::Relaxed);
-    while micros > old {
-        match TEX_BUILD_MAX_US.compare_exchange_weak(old, micros, Ordering::Relaxed, Ordering::Relaxed) {
-            Ok(_) => break,
-            Err(current) => old = current,
-        }
-    }
-}
-
 pub struct Texture3DCache {
     cache: HashMap<u64, Box<Texture3D>, utils::BuildNoHasher64>,
     total_size: u32,
@@ -651,21 +617,18 @@ impl Texture3DCache {
         for texture_3d in self.cache.values_mut() {
             if !texture_3d.dirty && texture_3d.is_dirty(mem_buf, mem_refs) {
                 texture_3d.dirty = true;
-                TEX_DIRTY_MARKS.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
 
     pub fn get(&mut self, draw: &Gpu3DDraw, mem_buf: &GpuMemBuf, mem_refs: &GpuMemRefs, texture_ids_to_delete: &mut Vec<GLuint>) -> &mut Texture3D {
         let key = draw.key();
-        let mut rebuilding_dirty = false;
         if let Some(texture_3d) = self.cache.get_mut(&key) {
             if texture_3d.in_use || !texture_3d.dirty {
                 texture_3d.last_used = Instant::now();
                 texture_3d.in_use = true;
                 return unsafe { mem::transmute(texture_3d.as_mut()) };
             } else {
-                rebuilding_dirty = true;
                 self.total_size -= texture_3d.metadata.size();
                 if texture_3d.texture_id != u32::MAX {
                     texture_ids_to_delete.push(texture_3d.texture_id);
@@ -674,15 +637,7 @@ impl Texture3DCache {
             }
         }
 
-        let build_start = Instant::now();
         let texture_3d = Texture3D::new(draw, &mem_buf.vram, mem_refs);
-        let build_us = build_start.elapsed().as_micros().min(u32::MAX as u128) as u32;
-        perf_add_build_time(build_us);
-        if rebuilding_dirty {
-            TEX_REBUILDS.fetch_add(1, Ordering::Relaxed);
-        } else {
-            TEX_NEW_BUILDS.fetch_add(1, Ordering::Relaxed);
-        }
 
         while self.total_size + texture_3d.metadata.size() >= CACHE_SIZE_LIMIT {
             let mut oldest_key = 0;
@@ -699,7 +654,6 @@ impl Texture3DCache {
             debug_assert_ne!(oldest_size, 0);
             self.total_size -= oldest_size;
             unsafe { self.cache.remove(&oldest_key).unwrap_unchecked() };
-            TEX_EVICTIONS.fetch_add(1, Ordering::Relaxed);
         }
         self.total_size += texture_3d.metadata.size();
         self.cache.insert(key, Box::new(texture_3d));
