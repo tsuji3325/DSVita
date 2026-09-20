@@ -71,6 +71,7 @@ mod logging;
 mod math;
 mod mmap;
 mod presenter;
+mod perf_diag;
 mod ra_context;
 mod savestate;
 mod screen_layouts;
@@ -519,6 +520,7 @@ pub fn actual_main() {
         emu_unsafe.get_mut().cartridge.set_cartridge_io(cartridge_io);
         emu_unsafe.get_mut().settings = settings;
 
+        perf_diag::reset();
         sound_sampler.get_mut().init();
 
         let savestate = presenter.get_savestate_path().and_then(|path| match std::fs::read(&path) {
@@ -789,6 +791,7 @@ pub fn actual_main() {
         }
         process_3d_thread.join().unwrap();
         save_thread.join().unwrap();
+        perf_diag::write_report();
         gpu_renderer.set_quit(false);
     }
 
