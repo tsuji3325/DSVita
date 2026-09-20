@@ -1,14 +1,4 @@
 use crate::core::emu::NitroSdkVersion;
-use crate::core::graphics::gpu_3d::renderer_3d::{
-    GPU3D_ASSEMBLE_MAX_US, GPU3D_ASSEMBLE_US, GPU3D_PROCESS_COUNT, GPU3D_PROCESS_MAX_US, GPU3D_PROCESS_US, GPU3D_TEX_CACHE_MAX_US, GPU3D_TEX_CACHE_US, GPU3D_VERTICES_MAX_US,
-    GPU3D_VERTICES_US, GPU3D_VRAM_WAIT_MAX_US, GPU3D_VRAM_WAIT_US, TEX_BUILD_MAX_US, TEX_BUILD_US, TEX_DIRTY_MARKS, TEX_EVICTIONS, TEX_NEW_BUILDS, TEX_REBUILDS,
-    TEX_UPLOAD_COUNT, TEX_UPLOAD_MAX_US, TEX_UPLOAD_US,
-};
-use crate::core::graphics::gpu_renderer::{
-    VRAM_CAPTURE_INSERT_MAX_US, VRAM_CAPTURE_INSERT_US, VRAM_DIRTY_COPY_MAX_US, VRAM_DIRTY_COPY_US, VRAM_FULL_READ_COUNT, VRAM_MAP_REBUILD_MAX_US, VRAM_MAP_REBUILD_US,
-    VRAM_MAPPING_CHANGE_COUNT, VRAM_PARTIAL_COPIED_BYTES, VRAM_PARTIAL_READ_COUNT, VRAM_READ_2D_A_US, VRAM_READ_2D_B_US, VRAM_READ_3D_US, VRAM_READ_ALL_MAX_US, VRAM_READ_ALL_US,
-    VRAM_READ_LCDC_US,
-};
 use crate::core::memory::regions::{self, OAM_OFFSET};
 use crate::core::CpuType::ARM9;
 use crate::core::{div_sqrt, CpuType};
@@ -18,10 +8,7 @@ use crate::jit::inst_branch_handler::check_scheduler;
 use crate::jit::inst_info::InstInfo;
 use crate::jit::jit_asm::JitAsm;
 use crate::jit::jit_asm_common_funs::exit_guest_context;
-use crate::jit::jit_memory::{
-    JitEntry, JIT_ARM9_ALLOCATED_BYTES, JIT_ARM9_CACHE_FREED_BLOCKS, JIT_ARM9_CACHE_FREED_BYTES, JIT_ARM9_CACHE_RESET_COUNT, JIT_WRITE_INVALIDATION_COUNT,
-    OVERLAY_HOOK_INVALIDATED_COUNT, OVERLAY_JIT_COMPILE_COUNT,
-};
+use crate::jit::jit_memory::JitEntry;
 use crate::jit::op::Op;
 use crate::jit::reg::Reg;
 use crate::logging::{debug_println, info_println};
@@ -30,7 +17,6 @@ use crate::{cartridge_io, get_jit_asm_ptr, IS_DEBUG};
 use std::cmp::min;
 use std::intrinsics::{likely, unlikely};
 use std::mem::MaybeUninit;
-use std::sync::atomic::Ordering;
 use std::{mem, slice};
 use CpuType::ARM7;
 
@@ -471,109 +457,6 @@ unsafe extern "C" fn hle_os_irqhandler(guest_pc: u32) {
     jit_entry(irq_func);
 }
 
-#[cfg(target_os = "vita")]
-fn append_overlay_perf_log(
-    id: u32,
-    ram_address: u32,
-    total_size: u32,
-    compiled_since_prev: u32,
-    write_invalidations: u32,
-    hook_invalidated_pages: u32,
-    jit_allocated_bytes: u32,
-    jit_cache_resets: u32,
-    jit_freed_blocks: u32,
-    jit_freed_bytes: u32,
-    gpu3d_process_count: u32,
-    gpu3d_process_us: u32,
-    gpu3d_process_max_us: u32,
-    gpu3d_vertices_us: u32,
-    gpu3d_vertices_max_us: u32,
-    gpu3d_assemble_us: u32,
-    gpu3d_assemble_max_us: u32,
-    gpu3d_vram_wait_us: u32,
-    gpu3d_vram_wait_max_us: u32,
-    gpu3d_tex_cache_us: u32,
-    gpu3d_tex_cache_max_us: u32,
-    tex_dirty_marks: u32,
-    tex_rebuilds: u32,
-    tex_new_builds: u32,
-    tex_evictions: u32,
-    tex_build_us: u32,
-    tex_build_max_us: u32,
-    tex_upload_count: u32,
-    tex_upload_us: u32,
-    tex_upload_max_us: u32,
-    vram_dirty_copy_us: u32,
-    vram_dirty_copy_max_us: u32,
-    vram_map_rebuild_us: u32,
-    vram_map_rebuild_max_us: u32,
-    vram_capture_insert_us: u32,
-    vram_capture_insert_max_us: u32,
-    vram_read_all_us: u32,
-    vram_read_all_max_us: u32,
-    vram_read_lcdc_us: u32,
-    vram_read_2d_a_us: u32,
-    vram_read_2d_b_us: u32,
-    vram_read_3d_us: u32,
-    vram_full_read_count: u32,
-    vram_partial_read_count: u32,
-    vram_partial_copied_bytes: u32,
-    vram_mapping_change_count: u32,
-) {
-    // Practical performance test: keep diagnostics counters but avoid synchronous
-    // filesystem I/O on every overlay event.
-}
-
-#[cfg(not(target_os = "vita"))]
-fn append_overlay_perf_log(
-    _id: u32,
-    _ram_address: u32,
-    _total_size: u32,
-    _compiled_since_prev: u32,
-    _write_invalidations: u32,
-    _hook_invalidated_pages: u32,
-    _jit_allocated_bytes: u32,
-    _jit_cache_resets: u32,
-    _jit_freed_blocks: u32,
-    _jit_freed_bytes: u32,
-    _gpu3d_process_count: u32,
-    _gpu3d_process_us: u32,
-    _gpu3d_process_max_us: u32,
-    _gpu3d_vertices_us: u32,
-    _gpu3d_vertices_max_us: u32,
-    _gpu3d_assemble_us: u32,
-    _gpu3d_assemble_max_us: u32,
-    _gpu3d_vram_wait_us: u32,
-    _gpu3d_vram_wait_max_us: u32,
-    _gpu3d_tex_cache_us: u32,
-    _gpu3d_tex_cache_max_us: u32,
-    _tex_dirty_marks: u32,
-    _tex_rebuilds: u32,
-    _tex_new_builds: u32,
-    _tex_evictions: u32,
-    _tex_build_us: u32,
-    _tex_build_max_us: u32,
-    _tex_upload_count: u32,
-    _tex_upload_us: u32,
-    _tex_upload_max_us: u32,
-    _vram_dirty_copy_us: u32,
-    _vram_dirty_copy_max_us: u32,
-    _vram_map_rebuild_us: u32,
-    _vram_map_rebuild_max_us: u32,
-    _vram_capture_insert_us: u32,
-    _vram_capture_insert_max_us: u32,
-    _vram_read_all_us: u32,
-    _vram_read_all_max_us: u32,
-    _vram_read_lcdc_us: u32,
-    _vram_read_2d_a_us: u32,
-    _vram_read_2d_b_us: u32,
-    _vram_read_3d_us: u32,
-    _vram_full_read_count: u32,
-    _vram_partial_read_count: u32,
-    _vram_partial_copied_bytes: u32,
-    _vram_mapping_change_count: u32,
-) {}
-
 unsafe extern "C" fn fs_clear_overlay_image_hook() {
     let asm = get_jit_asm_ptr::<{ ARM9 }>().as_mut_unchecked();
     let regs = ARM9.thread_regs();
@@ -586,105 +469,11 @@ unsafe extern "C" fn fs_clear_overlay_image_hook() {
 
     let overlay_info_header: &cartridge_io::FsOverlayInfoHeader = mem::transmute(asm.emu.mem.shm.as_ptr().add(shm_offset));
 
-    let compiled_since_prev = OVERLAY_JIT_COMPILE_COUNT.swap(0, Ordering::Relaxed);
-    let write_invalidations = JIT_WRITE_INVALIDATION_COUNT.swap(0, Ordering::Relaxed);
-    let jit_allocated_bytes = JIT_ARM9_ALLOCATED_BYTES.swap(0, Ordering::Relaxed);
-    let jit_cache_resets = JIT_ARM9_CACHE_RESET_COUNT.swap(0, Ordering::Relaxed);
-    let jit_freed_blocks = JIT_ARM9_CACHE_FREED_BLOCKS.swap(0, Ordering::Relaxed);
-    let jit_freed_bytes = JIT_ARM9_CACHE_FREED_BYTES.swap(0, Ordering::Relaxed);
-    let gpu3d_process_count = GPU3D_PROCESS_COUNT.swap(0, Ordering::Relaxed);
-    let gpu3d_process_us = GPU3D_PROCESS_US.swap(0, Ordering::Relaxed);
-    let gpu3d_process_max_us = GPU3D_PROCESS_MAX_US.swap(0, Ordering::Relaxed);
-    let gpu3d_vertices_us = GPU3D_VERTICES_US.swap(0, Ordering::Relaxed);
-    let gpu3d_vertices_max_us = GPU3D_VERTICES_MAX_US.swap(0, Ordering::Relaxed);
-    let gpu3d_assemble_us = GPU3D_ASSEMBLE_US.swap(0, Ordering::Relaxed);
-    let gpu3d_assemble_max_us = GPU3D_ASSEMBLE_MAX_US.swap(0, Ordering::Relaxed);
-    let gpu3d_vram_wait_us = GPU3D_VRAM_WAIT_US.swap(0, Ordering::Relaxed);
-    let gpu3d_vram_wait_max_us = GPU3D_VRAM_WAIT_MAX_US.swap(0, Ordering::Relaxed);
-    let gpu3d_tex_cache_us = GPU3D_TEX_CACHE_US.swap(0, Ordering::Relaxed);
-    let gpu3d_tex_cache_max_us = GPU3D_TEX_CACHE_MAX_US.swap(0, Ordering::Relaxed);
-    let tex_dirty_marks = TEX_DIRTY_MARKS.swap(0, Ordering::Relaxed);
-    let tex_rebuilds = TEX_REBUILDS.swap(0, Ordering::Relaxed);
-    let tex_new_builds = TEX_NEW_BUILDS.swap(0, Ordering::Relaxed);
-    let tex_evictions = TEX_EVICTIONS.swap(0, Ordering::Relaxed);
-    let tex_build_us = TEX_BUILD_US.swap(0, Ordering::Relaxed);
-    let tex_build_max_us = TEX_BUILD_MAX_US.swap(0, Ordering::Relaxed);
-    let tex_upload_count = TEX_UPLOAD_COUNT.swap(0, Ordering::Relaxed);
-    let tex_upload_us = TEX_UPLOAD_US.swap(0, Ordering::Relaxed);
-    let tex_upload_max_us = TEX_UPLOAD_MAX_US.swap(0, Ordering::Relaxed);
-    let vram_dirty_copy_us = VRAM_DIRTY_COPY_US.swap(0, Ordering::Relaxed);
-    let vram_dirty_copy_max_us = VRAM_DIRTY_COPY_MAX_US.swap(0, Ordering::Relaxed);
-    let vram_map_rebuild_us = VRAM_MAP_REBUILD_US.swap(0, Ordering::Relaxed);
-    let vram_map_rebuild_max_us = VRAM_MAP_REBUILD_MAX_US.swap(0, Ordering::Relaxed);
-    let vram_capture_insert_us = VRAM_CAPTURE_INSERT_US.swap(0, Ordering::Relaxed);
-    let vram_capture_insert_max_us = VRAM_CAPTURE_INSERT_MAX_US.swap(0, Ordering::Relaxed);
-    let vram_read_all_us = VRAM_READ_ALL_US.swap(0, Ordering::Relaxed);
-    let vram_read_all_max_us = VRAM_READ_ALL_MAX_US.swap(0, Ordering::Relaxed);
-    let vram_read_lcdc_us = VRAM_READ_LCDC_US.swap(0, Ordering::Relaxed);
-    let vram_read_2d_a_us = VRAM_READ_2D_A_US.swap(0, Ordering::Relaxed);
-    let vram_read_2d_b_us = VRAM_READ_2D_B_US.swap(0, Ordering::Relaxed);
-    let vram_read_3d_us = VRAM_READ_3D_US.swap(0, Ordering::Relaxed);
-    let vram_full_read_count = VRAM_FULL_READ_COUNT.swap(0, Ordering::Relaxed);
-    let vram_partial_read_count = VRAM_PARTIAL_READ_COUNT.swap(0, Ordering::Relaxed);
-    let vram_partial_copied_bytes = VRAM_PARTIAL_COPIED_BYTES.swap(0, Ordering::Relaxed);
-    let vram_mapping_change_count = VRAM_MAPPING_CHANGE_COUNT.swap(0, Ordering::Relaxed);
-    OVERLAY_HOOK_INVALIDATED_COUNT.store(0, Ordering::Relaxed);
-
     asm.emu.jit.invalidate_blocks(overlay_info_header.ram_address, overlay_info_header.total_size() as usize);
     asm.emu
         .jit
         .jit_memory_map
         .clear_exec_counts(overlay_info_header.ram_address, overlay_info_header.total_size() as usize);
-
-    let hook_invalidated_pages = OVERLAY_HOOK_INVALIDATED_COUNT.swap(0, Ordering::Relaxed);
-    append_overlay_perf_log(
-        overlay_info_header.id,
-        overlay_info_header.ram_address,
-        overlay_info_header.total_size(),
-        compiled_since_prev,
-        write_invalidations,
-        hook_invalidated_pages,
-        jit_allocated_bytes,
-        jit_cache_resets,
-        jit_freed_blocks,
-        jit_freed_bytes,
-        gpu3d_process_count,
-        gpu3d_process_us,
-        gpu3d_process_max_us,
-        gpu3d_vertices_us,
-        gpu3d_vertices_max_us,
-        gpu3d_assemble_us,
-        gpu3d_assemble_max_us,
-        gpu3d_vram_wait_us,
-        gpu3d_vram_wait_max_us,
-        gpu3d_tex_cache_us,
-        gpu3d_tex_cache_max_us,
-        tex_dirty_marks,
-        tex_rebuilds,
-        tex_new_builds,
-        tex_evictions,
-        tex_build_us,
-        tex_build_max_us,
-        tex_upload_count,
-        tex_upload_us,
-        tex_upload_max_us,
-        vram_dirty_copy_us,
-        vram_dirty_copy_max_us,
-        vram_map_rebuild_us,
-        vram_map_rebuild_max_us,
-        vram_capture_insert_us,
-        vram_capture_insert_max_us,
-        vram_read_all_us,
-        vram_read_all_max_us,
-        vram_read_lcdc_us,
-        vram_read_2d_a_us,
-        vram_read_2d_b_us,
-        vram_read_3d_us,
-        vram_full_read_count,
-        vram_partial_read_count,
-        vram_partial_copied_bytes,
-        vram_mapping_change_count,
-    );
 }
 
 unsafe extern "C" fn hle_microcode_shakehand(guest_pc: u32) {
