@@ -662,10 +662,12 @@ impl GpuRenderer {
             1.0
         };
 
+        let frame_ready_wait_start = Instant::now();
         {
             let rendering = self.rendering.lock().unwrap();
             let _drawing = self.rendering_condvar.wait_while(rendering, |rendering| !*rendering).unwrap();
         }
+        let frame_ready_wait_us = frame_ready_wait_start.elapsed().as_micros().min(u32::MAX as u128) as u32;
 
         if self.rendering_3d {
             self.renderer_3d.set_tex_ptrs(&mut self.gpu_mem_refs);
@@ -676,14 +678,17 @@ impl GpuRenderer {
 
         unsafe {
             let disp_cap_cnt = self.common.disp_cap_cnt[0];
+            let vram_prep_start = Instant::now();
             self.common.mem_buf.rebuild_vram_maps();
             self.common.mem_buf.insert_capture_mem(&self.capture_mem);
-            self.common
+            let (vram_2d_us, vram_3d_us) = self
+                .common
                 .mem_buf
                 .read_all(&mut self.gpu_mem_refs, self.renderer_regs_2d_shared.has_vram_display[0], self.rendering_3d);
             if self.rendering_3d {
                 self.renderer_3d.on_vram_ready();
             }
+            let vram_prep_us = vram_prep_start.elapsed().as_micros().min(u32::MAX as u128) as u32;
 
             if disp_cap_cnt.capture_enabled() && u8::from(disp_cap_cnt.capture_source()) != 0 {
                 // todo!()
@@ -691,6 +696,7 @@ impl GpuRenderer {
 
             self.renderer_vram_busy.store(false, Ordering::SeqCst);
 
+            let draw_2d_start = Instant::now();
             gl::BindFramebuffer(gl::FRAMEBUFFER, self.final_fbo.fbo);
             gl::Viewport(0, 0, PRESENTER_SCREEN_WIDTH as _, PRESENTER_SCREEN_HEIGHT as _);
             gl::ClearColor(0f32, 0f32, 0f32, 1f32);
@@ -708,29 +714,38 @@ impl GpuRenderer {
                 self.renderer_2d.draw::<{ A }>(&self.gpu_mem_refs, &self.renderer_regs_2d_shared);
                 b_fbo_color
             };
+            let mut draw_2d_us = draw_2d_start.elapsed().as_micros().min(u32::MAX as u128) as u32;
 
+            let mut wait_3d_us = 0u32;
+            let mut render_3d_us = 0u32;
             if self.rendering_3d {
                 self.rendering_3d = false;
+                let wait_3d_start = Instant::now();
                 let processed_3d = self.processed_3d.lock().unwrap();
                 let (_processed_3d, timeout) = self
                     .processed_3d_condvar
                     .wait_timeout_while(processed_3d, Duration::from_millis(1000), |processed_3d| !*processed_3d)
                     .unwrap();
+                wait_3d_us = wait_3d_start.elapsed().as_micros().min(u32::MAX as u128) as u32;
                 if unlikely(timeout.timed_out()) {
                     info_println!("waiting for 3d processing timed out");
                 }
+                let render_3d_start = Instant::now();
                 self.renderer_3d.render(&self.common, upscale_3d_factor_index, widescreen, widescreen_coefficient);
+                render_3d_us = render_3d_start.elapsed().as_micros().min(u32::MAX as u128) as u32;
             }
 
             let fbo_3d = self
                 .renderer_3d
                 .get_fbo(self.common.pow_cnt1[0].display_swap(), upscale_3d_factor_index, widescreen, widescreen_coefficient);
+            let a_blend_start = Instant::now();
             let a_fbo_color = if self.renderer_soft_2d.is_some() {
                 let color_3d = fbo_3d.color();
                 self.renderer_soft_2d.as_mut().unwrap().blend::<{ A }>(&self.common, &self.renderer_regs_2d_shared, color_3d)
             } else {
                 self.renderer_2d.blend::<{ A }>(&self.gpu_mem_refs, &self.renderer_regs_2d_shared, Some(fbo_3d))
             };
+            draw_2d_us = draw_2d_us.saturating_add(a_blend_start.elapsed().as_micros().min(u32::MAX as u128) as u32);
 
             if disp_cap_cnt.capture_enabled() && u8::from(disp_cap_cnt.capture_source()) != 1 {
                 if u8::from(disp_cap_cnt.capture_size()) == 0 {
@@ -1036,8 +1051,26 @@ impl GpuRenderer {
             }
 
             let render_time_diff = Instant::now().duration_since(render_time_start);
+            let render_work_us = render_time_diff.as_micros().min(u32::MAX as u128) as u32;
+            let classified_us = vram_prep_us
+                .saturating_add(draw_2d_us)
+                .saturating_add(wait_3d_us)
+                .saturating_add(render_3d_us);
+            let other_render_us = render_work_us.saturating_sub(classified_us);
 
-            self.render_time_sum += render_time_diff.as_micros() as u32;
+            crate::perf_diag::record_render_frame(
+                frame_ready_wait_us,
+                render_work_us,
+                vram_prep_us,
+                vram_2d_us,
+                vram_3d_us,
+                draw_2d_us,
+                wait_3d_us,
+                render_3d_us,
+                other_render_us,
+            );
+
+            self.render_time_sum += render_work_us;
             self.render_time_measure_count += 1;
             if unlikely(self.render_time_measure_count == 30) {
                 self.render_time_measure_count = 0;
