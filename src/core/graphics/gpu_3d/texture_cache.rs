@@ -482,6 +482,7 @@ impl Texture3D {
 
     pub unsafe fn get_texture_id(&mut self) -> GLuint {
         if self.texture_id == u32::MAX {
+            let upload_start = Instant::now();
             let mut tex = 0;
             gl::GenTextures(1, &mut tex);
             gl::BindTexture(gl::TEXTURE_2D, tex);
@@ -501,6 +502,10 @@ impl Texture3D {
             gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as _);
             gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE as _);
             gl::BindTexture(gl::TEXTURE_2D, 0);
+
+            let upload_us = upload_start.elapsed().as_micros().min(u32::MAX as u128) as u32;
+            TEX_UPLOAD_COUNT.fetch_add(1, Ordering::Relaxed);
+            perf_add_upload_time(upload_us);
 
             self.texture_id = tex;
             self.data.destroy();
@@ -595,6 +600,9 @@ pub static TEX_NEW_BUILDS: AtomicU32 = AtomicU32::new(0);
 pub static TEX_EVICTIONS: AtomicU32 = AtomicU32::new(0);
 pub static TEX_BUILD_US: AtomicU32 = AtomicU32::new(0);
 pub static TEX_BUILD_MAX_US: AtomicU32 = AtomicU32::new(0);
+pub static TEX_UPLOAD_COUNT: AtomicU32 = AtomicU32::new(0);
+pub static TEX_UPLOAD_US: AtomicU32 = AtomicU32::new(0);
+pub static TEX_UPLOAD_MAX_US: AtomicU32 = AtomicU32::new(0);
 
 #[inline]
 fn perf_add_build_time(micros: u32) {
@@ -602,6 +610,18 @@ fn perf_add_build_time(micros: u32) {
     let mut old = TEX_BUILD_MAX_US.load(Ordering::Relaxed);
     while micros > old {
         match TEX_BUILD_MAX_US.compare_exchange_weak(old, micros, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(current) => old = current,
+        }
+    }
+}
+
+#[inline]
+fn perf_add_upload_time(micros: u32) {
+    TEX_UPLOAD_US.fetch_add(micros, Ordering::Relaxed);
+    let mut old = TEX_UPLOAD_MAX_US.load(Ordering::Relaxed);
+    while micros > old {
+        match TEX_UPLOAD_MAX_US.compare_exchange_weak(old, micros, Ordering::Relaxed, Ordering::Relaxed) {
             Ok(_) => break,
             Err(current) => old = current,
         }
