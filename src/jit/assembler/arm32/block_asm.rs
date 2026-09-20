@@ -144,6 +144,25 @@ impl BlockAsm {
         self.mov4(FlagsUpdate_DontCare, Cond::AL, Reg::R0, &Reg::R4.into());
     }
 
+    /// Publish the runtime target before entry dispatch (including interior entry).
+    /// R0 carries the tagged guest PC. Preserve all registers and CPSR flags.
+    pub fn emit_sample_entry_pc(&mut self) {
+        self.push1(reg_reserve!(Reg::R1, Reg::R2));
+        self.ldr2(Reg::R1, crate::perf_diag::arm9_pc_slot() as u32);
+        self.str3(Cond::AL, Reg::R0, &Reg::R1.into());
+        self.pop1(reg_reserve!(Reg::R1, Reg::R2));
+    }
+
+    /// Local branches skip the prologue, so publish again after their label.
+    /// LDR/STR/PUSH/POP leave flags intact in both ARM and Thumb modes.
+    pub fn emit_sample_block_pc(&mut self, pc: u32) {
+        self.push1(reg_reserve!(Reg::R0, Reg::R1));
+        self.ldr2(Reg::R0, pc);
+        self.ldr2(Reg::R1, crate::perf_diag::arm9_pc_slot() as u32);
+        self.str3(Cond::AL, Reg::R0, &Reg::R1.into());
+        self.pop1(reg_reserve!(Reg::R0, Reg::R1));
+    }
+
     /// Block-entry dispatch: the target pc arrives in R0; on a mismatch against this
     /// block's `pc` the delta is handed to `jump_fun` (jump_to_other_guest_pc) which
     /// resolves the in-block entry offset; a match falls through to the guest start.

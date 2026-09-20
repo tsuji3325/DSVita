@@ -61,6 +61,15 @@ const STAT_COUNT: usize = 45;
 static STATS: [AtomicU32; STAT_COUNT] = [const { AtomicU32::new(0) }; STAT_COUNT];
 
 static CURRENT_ARM9_PC: AtomicU32 = AtomicU32::new(0);
+
+// ARM32 generated code writes one naturally aligned word with STR, the same
+// operation as an AtomicU32 relaxed store on Vita. This slot has static lifetime;
+// the sampler only reads it atomically. No read-modify-write or barrier is needed
+// because the PC does not publish any other data.
+#[cfg(target_arch = "arm")]
+pub(crate) fn arm9_pc_slot() -> *mut u32 {
+    CURRENT_ARM9_PC.as_ptr()
+}
 static LAST_OVERLAY_EVENT_ID: AtomicU32 = AtomicU32::new(NO_OVERLAY);
 static CURRENT_FRAME_ID: AtomicU32 = AtomicU32::new(1);
 static LAST_COMPLETED_FRAME_ID: AtomicU32 = AtomicU32::new(0);
@@ -127,8 +136,8 @@ pub(crate) fn publish_arm9_pc(pc: u32) {
 }
 
 #[inline]
-pub(crate) fn clear_arm9_pc() {
-    CURRENT_ARM9_PC.store(0, Ordering::Relaxed);
+pub(crate) fn replace_arm9_pc(pc: u32) -> u32 {
+    CURRENT_ARM9_PC.swap(pc, Ordering::Relaxed)
 }
 
 #[inline]
@@ -312,7 +321,8 @@ pub(crate) fn write_report() {
 
     let mut report = format!(
         concat!(
-            "report_version=2\n",
+            "report_version=3\n",
+            "pc_source=arm9_jit_block_boundary_and_interpreter_entry pc_note=last_guest_boundary_includes_host_helpers_not_instruction_exact\n",
             "slow_threshold_us={} pc_sample_interval_ms=1 pc_bucket_size={} overlay_hint_note=last_FS_ClearOverlayImage_event_not_ownership\n",
             "cpu_frames={} cpu_avg_us={} cpu_max_us={} cpu_slow_frames={} cpu_slow_avg_us={} cpu_slow_max_us={}\n",
             "rom_page_misses={} rom_read_total_us={} rom_read_max_us={} slow_frame_rom_misses={} slow_frame_rom_read_us={}\n",
@@ -386,5 +396,61 @@ pub(crate) fn write_report() {
     #[cfg(not(target_os = "vita"))]
     {
         let _ = std::fs::write("frame_perf.log", report);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    fn wait_until(mut predicate: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !predicate() {
+            assert!(Instant::now() < deadline, "sampler timed out");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn samples_changing_pcs_classifies_slow_frames_and_writes_only_at_exit() {
+        reset();
+        let _ = std::fs::remove_file("frame_perf.log");
+        let active = Arc::new(AtomicBool::new(true));
+        let sampler_active = active.clone();
+        let sampler = std::thread::spawn(move || run_arm9_sampler(sampler_active));
+        let first = 0x020DD181;
+        let second = 0x021E5180;
+        let first_key = sample_key(first, 3);
+        let second_key = sample_key(second, 3);
+        set_overlay_event_id(3);
+        publish_arm9_pc(first);
+        wait_until(|| sample_map_all().lock().unwrap().get(&first_key).copied().unwrap_or(0) >= 5);
+        publish_arm9_pc(second);
+        wait_until(|| sample_map_all().lock().unwrap().get(&second_key).copied().unwrap_or(0) >= 5);
+        let saved = replace_arm9_pc(0);
+        assert_eq!(saved, second);
+        assert_eq!(CURRENT_ARM9_PC.load(Ordering::Relaxed), 0);
+        publish_arm9_pc(saved);
+        record_cpu_frame_interval(60_000);
+        wait_until(|| sample_map_slow().lock().unwrap().contains_key(&second_key));
+        publish_arm9_pc(0x02000E00);
+        let normal_key = sample_key(0x02000E00, 3);
+        wait_until(|| sample_map_all().lock().unwrap().get(&normal_key).copied().unwrap_or(0) >= 5);
+        record_cpu_frame_interval(30_000);
+        active.store(false, Ordering::Relaxed);
+        sampler.join().unwrap();
+        assert!(sample_map_slow().lock().unwrap().contains_key(&first_key));
+        assert!(!sample_map_slow().lock().unwrap().contains_key(&normal_key));
+        assert!(!std::path::Path::new("frame_perf.log").exists());
+        write_report();
+        let report = std::fs::read_to_string("frame_perf.log").unwrap();
+        assert!(report.contains("report_version=3"));
+        assert!(report.contains("cpu_slow_frames=1"));
+        assert!(report.contains("[top_slow_pc_buckets]"));
+        assert!(report.contains("0x020DD180-0x020DD1BF"));
+        reset();
+        assert!(sample_map_all().lock().unwrap().is_empty());
+        assert!(sample_map_slow().lock().unwrap().is_empty());
     }
 }

@@ -304,6 +304,9 @@ fn interpret_block_inner<const THUMB: bool>(asm: &mut JitAsm, guest_pc: u32) {
     let arm7_hle = asm.emu.settings.arm7_emu() == Arm7Emu::Hle;
     let regs: *mut ThreadRegs = cpu.thread_regs();
     let mut addr = guest_pc;
+    if cpu == ARM9 {
+        crate::perf_diag::publish_arm9_pc(addr | THUMB as u32);
+    }
 
     let step: u32 = if THUMB { 2 } else { 4 };
     // Sequential opcode fetch: resolve the shm offset once and bump it alongside `addr`, instead
@@ -464,6 +467,9 @@ fn interpret_block_inner<const THUMB: bool>(asm: &mut JitAsm, guest_pc: u32) {
                         && !(aligned & 0xFFFF000 == 0x1FF8000 && cpu == ARM9 && arm7_hle && asm.emu.nitro_sdk_version.is_twl_sdk())
                     {
                         addr = aligned;
+                        if cpu == ARM9 {
+                            crate::perf_diag::publish_arm9_pc(addr | THUMB as u32);
+                        }
                         page_left = 0;
                         continue;
                     }
@@ -487,6 +493,9 @@ fn interpret_block_inner<const THUMB: bool>(asm: &mut JitAsm, guest_pc: u32) {
                     }
                 }
                 addr = lr & !1;
+                if cpu == ARM9 {
+                    crate::perf_diag::publish_arm9_pc(addr | THUMB as u32);
+                }
                 page_left = 0;
             }
             InstResult::BranchReturn(cycles, target) => {

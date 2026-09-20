@@ -185,6 +185,10 @@ impl JitAsm<'_> {
         if !has_return {
             return;
         }
+        if self.cpu == ARM9 {
+            let resume_pc = block_asm.current_pc + if block_asm.thumb { 3 } else { 4 };
+            block_asm.emit_sample_block_pc(resume_pc);
+        }
         block_asm.ldr2(Reg::R1, ptr::addr_of_mut!(self.runtime_data) as u32);
 
         if inst_index == self.jit_buf.insts.len() - 1 {
@@ -214,6 +218,10 @@ impl JitAsm<'_> {
         self.emit_call_branch_reg(inst_index, target_pc_reg, has_return, block_asm);
 
         if has_return {
+            if self.cpu == ARM9 {
+                let resume_pc = block_asm.current_pc + if block_asm.thumb { 3 } else { 4 };
+                block_asm.emit_sample_block_pc(resume_pc);
+            }
             if inst_index == self.jit_buf.insts.len() - 1 {
                 block_asm.mov4(FlagsUpdate_DontCare, Cond::AL, Reg::R0, &0.into());
                 block_asm.ldr2(Reg::R1, ptr::addr_of_mut!(self.runtime_data) as u32);

@@ -707,6 +707,11 @@ fn emit_code_block_internal(asm: &mut JitAsm, guest_pc: u32, thumb: bool) {
         let mut block_asm = BlockAsm::new(asm.cpu, thumb, is_os_irq_handler);
         block_asm.prologue(asm.analyzer.basic_blocks.len());
 
+        #[cfg(target_arch = "arm")]
+        if asm.cpu == ARM9 {
+            block_asm.emit_sample_entry_pc();
+        }
+
         // ARM7 homebrew self-modifying-code guard: no nitro-sdk means no write-protect
         // contract on ARM7 code — rehash on every fresh block entry instead.
         if asm.cpu == ARM7 && guest_pc & 0xFF000000 != regions::VRAM_OFFSET && !asm.emu.nitro_sdk_version.is_valid() {
@@ -867,13 +872,11 @@ impl<'a> JitAsm<'a> {
 
     pub fn execute<const CPU: CpuType>(&mut self) -> u16 {
         let entry = CPU.thread_regs().pc;
-        if CPU == ARM9 {
-            crate::perf_diag::publish_arm9_pc(entry);
-        }
+        // ARM7 can run nested inside the ARM9 scheduler. Do not charge that
+        // interval to ARM9; restore the interrupted block's PC on return.
+        let previous_pc = crate::perf_diag::replace_arm9_pc(if CPU == ARM9 { entry } else { 0 });
         let cycles = execute_internal::<CPU>(entry);
-        if CPU == ARM9 {
-            crate::perf_diag::clear_arm9_pc();
-        }
+        crate::perf_diag::publish_arm9_pc(previous_pc);
         cycles
     }
 

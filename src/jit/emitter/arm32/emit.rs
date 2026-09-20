@@ -48,6 +48,10 @@ impl JitAsm<'_> {
                 block_asm.bind_basic_block(i);
             }
 
+            if self.cpu == ARM9 {
+                block_asm.emit_sample_block_pc(self.analyzer.basic_blocks[i].start_pc | thumb as u32);
+            }
+
             self.emit_basic_block(i, block_asm, thumb);
 
             let block_size = block_asm.get_cursor_offset() as usize - cursor_start;
