@@ -170,6 +170,8 @@ impl JitAsm<'_> {
                     block_asm.ldr2(Reg::R2, imm_addr);
                     block_asm.ensure_emit_for(64);
                 } else if !is_write && size == 4 && self.analyzer.can_imm_load(imm_addr) {
+                    // Folded data is a compilation dependency too.
+                    self.emu.jit.main_code_footprint.mark(imm_addr & !3, 4 + (imm_addr & 3) as usize);
                     let imm_value = match self.cpu {
                         ARM9 => self.emu.mem_read::<{ ARM9 }, u32>(imm_addr),
                         ARM7 => self.emu.mem_read::<{ ARM7 }, u32>(imm_addr),

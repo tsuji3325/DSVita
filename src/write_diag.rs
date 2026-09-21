@@ -109,7 +109,7 @@ pub(crate) fn append_report(out: &mut String) {
     out.push_str("[target_write_detail]\ntarget_pc=0x0225F4F8 watched_physical_range=0x0225F400-0x0225F5FF\n");
     out.push_str("scope=main_RAM_slow_write_paths_including_ARM7_and_DMA aliases_normalized_for_filter source_hint=last_ARM9_bucket_and_phase_not_exact_writer requested_span=existing_invalidation_argument_not_always_distinct_write_bytes\n");
     out.push_str("comparison=byte_exact_last_compiled_guest_range_may_include_literal_data range_unknown=before_first_supported_compile_or_unsupported_extent direct_fast_writes_not_observed same_at_recompile_does_not_exclude_intermediate_changes\n");
-    out.push_str("invalidating=existing_live_bit_on_watched_first_or_last_page_before_original_invalidation no_invalidation_decisions_changed\n");
+    out.push_str("invalidating=live_watched_endpoint_and_not_proven_disjoint_from_session_dependencies policy=range_preserve_v7\n");
     out.push_str(&format!("compiles={} repeat_same_bytes={} repeat_changed_bytes={} repeat_different_extent={} unsupported_extent_or_mode={} last_end=0x{:08X} row_limit={} dropped_row_observations={}\n",s.compiles,s.repeat_same,s.repeat_changed,s.repeat_different_extent,s.unsupported,s.end.unwrap_or(0),ROW_LIMIT,s.dropped_rows));
     out.push_str(&format!("total {}\n",s.totals.text()));
     let mut rows: Vec<_> = s.rows.iter().collect();

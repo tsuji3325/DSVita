@@ -691,6 +691,8 @@ fn emit_code_block_internal(asm: &mut JitAsm, guest_pc: u32, thumb: bool) {
         asm.cpu,
     );
 
+    // Include HLE candidates, even when they bypass native block registration.
+    asm.emu.jit.main_code_footprint.mark(guest_pc, (guest_pc_end - guest_pc + if thumb { 2 } else { 4 }) as usize);
     let decode_us = crate::compile_diag::elapsed(decode_start);
     if asm.cpu == ARM9 { crate::compile_diag::decoded(guest_pc | thumb as u32, decode_us); }
 

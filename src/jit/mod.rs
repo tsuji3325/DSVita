@@ -20,6 +20,7 @@ pub mod jit_asm;
 mod jit_asm_common_funs;
 pub mod jit_memory;
 mod jit_memory_map;
+mod main_code_footprint;
 #[cfg(target_os = "linux")]
 mod jit_perf_log;
 pub mod op;

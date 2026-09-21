@@ -401,6 +401,7 @@ pub struct JitMemory {
     jit_exec_counts: JitExecCounts,
     pub jit_memory_map: JitMemoryMap,
     jit_perf_map_record: JitPerfMapRecord,
+    pub(crate) main_code_footprint: crate::jit::main_code_footprint::MainCodeFootprint,
     pub guest_inst_offsets: HeapArray<Vec<GuestInstOffset>, { JIT_MEMORY_SIZE / PAGE_SIZE }>,
     guest_inst_metadata: HeapArray<Vec<GuestInstMetadata>, { JIT_MEMORY_SIZE / PAGE_SIZE }>,
     #[cfg(target_arch = "aarch64")]
@@ -420,6 +421,7 @@ impl Emu {
     }
 
     pub fn jit_set_live_range(&mut self, guest_pc: u32, guest_pc_end: u32, thumb: bool) {
+        self.jit.main_code_footprint.mark(guest_pc, (guest_pc_end - guest_pc) as usize);
         // >> 3 for u8 (each bit represents a page)
         let guest_pc_end = guest_pc_end - if thumb { 2 } else { 4 };
         let live_range_begin = guest_pc >> JIT_LIVE_RANGE_PAGE_SIZE_SHIFT;
@@ -641,6 +643,7 @@ impl JitMemory {
             jit_exec_counts,
             jit_memory_map,
             jit_perf_map_record: JitPerfMapRecord::new(),
+            main_code_footprint: crate::jit::main_code_footprint::MainCodeFootprint::new(),
             guest_inst_offsets: HeapArray::default(),
             guest_inst_metadata: HeapArray::default(),
             #[cfg(target_arch = "aarch64")]
@@ -662,6 +665,7 @@ impl JitMemory {
             JitMemoryMetadata::new(JIT_ARM7_MEMORY_SIZE, JIT_ARM9_MEMORY_SIZE, JIT_MEMORY_SIZE)
         };
         self.jit_entries.reset();
+        self.main_code_footprint.clear();
         self.jit_live_ranges.itcm.fill(0);
         self.jit_live_ranges.main.fill(0);
         self.jit_live_ranges.vram.fill(0);
@@ -793,7 +797,7 @@ impl JitMemory {
     }
 
     pub(crate) fn diagnostic_target_live_invalidation(&self, addr: u32, size: usize) -> bool {
-        if size == 0 { return false; }
+        if size == 0 || self.main_code_footprint.can_preserve(addr, size) { return false; }
         [addr, addr.wrapping_add(size as u32).wrapping_sub(1)].into_iter().any(|a| {
             if !crate::write_diag::watched_page(a) { return false; }
             let live = unsafe { *self.jit_memory_map.get_live_range(a) };
@@ -803,6 +807,16 @@ impl JitMemory {
 
     #[inline(never)]
     pub fn invalidate_block(&mut self, guest_addr: u32, size: usize) {
+        if size == 0 { return; }
+        // Preserve the live bit as well as entries: a later code/literal write
+        // must still take the original invalidation path. Whole-session masks
+        // deliberately retain stale dependencies across overlay/cache changes.
+        if self.main_code_footprint.can_preserve(guest_addr, size) {
+            if self.jit_memory_map.has_jit_block(guest_addr) {
+                crate::perf_diag::record_preserved_main_write();
+            }
+            return;
+        }
         macro_rules! invalidate {
             ($guest_addr:expr) => {{
                 let live_range = unsafe { self.jit_memory_map.get_live_range($guest_addr).as_mut_unchecked() };

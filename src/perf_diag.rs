@@ -63,6 +63,7 @@ static STATS: [AtomicU32; STAT_COUNT] = [const { AtomicU32::new(0) }; STAT_COUNT
 // Low six bits hold the execution phase; upper bits hold the 64-byte PC bucket.
 // One atomic read gives a coherent PC/phase pair, including across JIT edges.
 static CURRENT_ARM9_PC: AtomicU32 = AtomicU32::new(0);
+static PRESERVED_MAIN_WRITES: AtomicU32 = AtomicU32::new(0);
 pub(crate) const PHASE_JIT: u32 = 1;
 pub(crate) const PHASE_INTERPRETER: u32 = 2;
 pub(crate) const PHASE_COMPILE: u32 = 3;
@@ -180,7 +181,10 @@ fn merge_histogram(target: &Mutex<BTreeMap<u64, u32>>, source: &BTreeMap<u64, u3
     }
 }
 
+pub(crate) fn record_preserved_main_write() { single_writer_add(&PRESERVED_MAIN_WRITES, 1); }
+
 pub(crate) fn reset() {
+    PRESERVED_MAIN_WRITES.store(0, Ordering::Relaxed);
     crate::compile_diag::reset();
     crate::write_diag::reset();
     for stat in &STATS {
@@ -429,7 +433,7 @@ pub(crate) fn write_report() {
 
     let mut report = format!(
         concat!(
-            "report_version=6\n",
+            "report_version=7\n",
             "pc_source=arm9_jit_block_boundary_and_interpreter_entry pc_note=last_guest_boundary_includes_host_helpers_not_instruction_exact\n",
             "slow_threshold_us={} pc_sample_interval_ms=1 pc_bucket_size={} overlay_hint_note=last_FS_ClearOverlayImage_event_not_ownership\n",
             "cpu_frames={} cpu_avg_us={} cpu_max_us={} cpu_slow_frames={} cpu_slow_avg_us={} cpu_slow_max_us={}\n",
@@ -506,6 +510,7 @@ pub(crate) fn write_report() {
 
     crate::compile_diag::append_report(&mut report);
     crate::write_diag::append_report(&mut report);
+    report.push_str(&format!("[jit_write_preserve]\npreserved_live_page_writes={} policy=single_page_main_RAM_disjoint_from_session_code_and_folded_data footprint_bytes=524288 stale_dependencies_retained=true\n", PRESERVED_MAIN_WRITES.load(Ordering::Relaxed)));
     #[cfg(target_os = "vita")]
     {
         let _ = std::fs::create_dir_all("ux0:data/dsvita");
@@ -598,7 +603,7 @@ mod tests {
         assert!(!std::path::Path::new("frame_perf.log").exists());
         write_report();
         let report = std::fs::read_to_string("frame_perf.log").unwrap();
-        assert!(report.contains("report_version=6"));
+        assert!(report.contains("report_version=7"));
         assert!(report.contains("cpu_slow_frames=1"));
         assert!(report.contains("[top_slow_pc_buckets]"));
         assert!(report.contains("[slow_phase_samples]"));
