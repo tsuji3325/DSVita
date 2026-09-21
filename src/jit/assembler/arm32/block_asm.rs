@@ -10,7 +10,7 @@ use std::ops::{Deref, DerefMut};
 use std::ptr;
 use vixl::{
     BranchHint_kNear, FlagsUpdate, FlagsUpdate_DontCare, FlagsUpdate_LeaveFlags, InstructionSet_A32, InstructionSet_T32, Label, MacroAssembler, MaskedSpecialRegisterType_CPSR_f, MasmAdd5, MasmB2,
-    MasmB3, MasmBlx1, MasmLdr2, MasmLdr3, MasmLsr5, MasmMov2, MasmMov4, MasmMrs2, MasmMsr2, MasmNop, MasmPop1, MasmPush1, MasmStr3, MasmStrb2, MasmSub5, MasmSubs3, ShiftType_ASR, ShiftType_LSL,
+    MasmB3, MasmBic5, MasmOrr5, MasmBlx1, MasmLdr2, MasmLdr3, MasmLsr5, MasmMov2, MasmMov4, MasmMrs2, MasmMsr2, MasmNop, MasmPop1, MasmPush1, MasmStr3, MasmStrb2, MasmSub5, MasmSubs3, ShiftType_ASR, ShiftType_LSL,
     ShiftType_LSR, ShiftType_ROR, ShiftType_RRX, SpecialRegisterType_CPSR,
 };
 
@@ -147,17 +147,19 @@ impl BlockAsm {
     /// Publish the runtime target before entry dispatch (including interior entry).
     /// R0 carries the tagged guest PC. Preserve all registers and CPSR flags.
     pub fn emit_sample_entry_pc(&mut self) {
-        self.push1(reg_reserve!(Reg::R1, Reg::R2));
+        self.push1(reg_reserve!(Reg::R0, Reg::R1));
+        self.bic5(FlagsUpdate_LeaveFlags, Cond::AL, Reg::R0, Reg::R0, &63.into());
+        self.orr5(FlagsUpdate_LeaveFlags, Cond::AL, Reg::R0, Reg::R0, &crate::perf_diag::PHASE_JIT.into());
         self.ldr2(Reg::R1, crate::perf_diag::arm9_pc_slot() as u32);
         self.str3(Cond::AL, Reg::R0, &Reg::R1.into());
-        self.pop1(reg_reserve!(Reg::R1, Reg::R2));
+        self.pop1(reg_reserve!(Reg::R0, Reg::R1));
     }
 
     /// Local branches skip the prologue, so publish again after their label.
     /// LDR/STR/PUSH/POP leave flags intact in both ARM and Thumb modes.
     pub fn emit_sample_block_pc(&mut self, pc: u32) {
         self.push1(reg_reserve!(Reg::R0, Reg::R1));
-        self.ldr2(Reg::R0, pc);
+        self.ldr2(Reg::R0, crate::perf_diag::pack_pc_phase(pc, crate::perf_diag::PHASE_JIT));
         self.ldr2(Reg::R1, crate::perf_diag::arm9_pc_slot() as u32);
         self.str3(Cond::AL, Reg::R0, &Reg::R1.into());
         self.pop1(reg_reserve!(Reg::R0, Reg::R1));

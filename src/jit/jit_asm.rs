@@ -611,6 +611,7 @@ pub extern "C" fn emit_code_block(guest_pc: u32) {
 /// substitution attempts, then the per-arch compile+insert seam. The aarch64 backend
 /// additionally routes cold, refused and valve-disabled blocks to the interpreter.
 fn emit_code_block_internal(asm: &mut JitAsm, guest_pc: u32, thumb: bool) {
+    if asm.cpu == ARM9 { crate::perf_diag::publish_arm9_state(guest_pc, crate::perf_diag::PHASE_DISPATCH); }
     let is_os_irq_handler = if asm.emu.settings.hle_os_irq_handler() && asm.emu.nitro_sdk_version.is_valid() {
         if asm.cpu == ARM7 && asm.os_irq_handler_addr & 0xFF000000 != regions::SHARED_WRAM_OFFSET {
             asm.os_irq_handler_addr = asm.emu.mem_read::<{ ARM7 }, u32>(0x380FFFC);
@@ -680,6 +681,7 @@ fn emit_code_block_internal(asm: &mut JitAsm, guest_pc: u32, thumb: bool) {
         }
     }
 
+    if asm.cpu == ARM9 { crate::perf_diag::publish_arm9_state(guest_pc, crate::perf_diag::PHASE_COMPILE); }
     asm.jit_buf.clear_all();
     let guest_pc_end = JitAsm::fill_jit_insts_buf(asm.cpu, &mut asm.jit_buf.insts, &mut asm.jit_buf.insts_cycle_counts, asm.emu, guest_pc, thumb, is_os_irq_handler);
     debug_assert!(
@@ -739,6 +741,7 @@ fn emit_code_block_internal(asm: &mut JitAsm, guest_pc: u32, thumb: bool) {
         asm.runtime_data.pre_cycle_count_sum = 0;
         (jit_entry, flushed)
     };
+    if asm.cpu == ARM9 { crate::perf_diag::publish_arm9_state(guest_pc, crate::perf_diag::PHASE_JIT); }
     jit_entry(guest_pc | (thumb as u32));
     // The allocation flushed jit memory: host frames above may point into freed blocks —
     // unwind the whole guest context.
@@ -874,9 +877,11 @@ impl<'a> JitAsm<'a> {
         let entry = CPU.thread_regs().pc;
         // ARM7 can run nested inside the ARM9 scheduler. Do not charge that
         // interval to ARM9; restore the interrupted block's PC on return.
-        let previous_pc = crate::perf_diag::replace_arm9_pc(if CPU == ARM9 { entry } else { 0 });
+        let previous_pc = crate::perf_diag::replace_arm9_pc(if CPU == ARM9 {
+            crate::perf_diag::pack_pc_phase(entry, crate::perf_diag::PHASE_DISPATCH)
+        } else { 0 });
         let cycles = execute_internal::<CPU>(entry);
-        crate::perf_diag::publish_arm9_pc(previous_pc);
+        crate::perf_diag::restore_arm9_state(previous_pc);
         cycles
     }
 

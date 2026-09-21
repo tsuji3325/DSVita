@@ -25,18 +25,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           submodules: recursive
 
       - name: Apply Japanese UI
-        if: github.ref_name == 'japanese-ui' || github.ref_name == 'japanese-font-fix' || github.ref_name == 'jit-pc-end-fix' || github.ref_name == 'overlay-invalidation-test' || github.ref_name == 'overlay-range-invalidation' || github.ref_name == 'overlay-perf-diagnostic' || github.ref_name == 'wram-unmapped-fix' || github.ref_name == 'jit-churn-diagnostic' || github.ref_name == 'overlay-hotness-reset-test' || github.ref_name == 'overlay-jit-threshold-test' || github.ref_name == 'gpu-vram-perf-diagnostic' || github.ref_name == 'vram-readall-breakdown-diagnostic' || github.ref_name == 'partial-vram-update-test' || github.ref_name == 'partial-vram-update-b-full-test' || github.ref_name == 'partial-vram-3d-only-test' || github.ref_name == 'partial-vram-3d-only-nolog-test' || github.ref_name == 'practical-clean-build' || github.ref_name == 'frame-bottleneck-diagnostic' || github.ref_name == 'frame-bottleneck-block-pc'
+        if: github.ref_name == 'japanese-ui' || github.ref_name == 'japanese-font-fix' || github.ref_name == 'jit-pc-end-fix' || github.ref_name == 'overlay-invalidation-test' || github.ref_name == 'overlay-range-invalidation' || github.ref_name == 'overlay-perf-diagnostic' || github.ref_name == 'wram-unmapped-fix' || github.ref_name == 'jit-churn-diagnostic' || github.ref_name == 'overlay-hotness-reset-test' || github.ref_name == 'overlay-jit-threshold-test' || github.ref_name == 'gpu-vram-perf-diagnostic' || github.ref_name == 'vram-readall-breakdown-diagnostic' || github.ref_name == 'partial-vram-update-test' || github.ref_name == 'partial-vram-update-b-full-test' || github.ref_name == 'partial-vram-3d-only-test' || github.ref_name == 'partial-vram-3d-only-nolog-test' || github.ref_name == 'practical-clean-build' || github.ref_name == 'frame-bottleneck-diagnostic' || github.ref_name == 'frame-bottleneck-block-pc' || github.ref_name == 'frame-bottleneck-cart-phase'
         run: python3 tools/apply_japanese_ui.py
 
-      - name: Test frame sampler
+      - name: Test cartridge diagnostics and frame sampler
         run: |
-          rustc +stable --edition=2021 --test src/perf_diag.rs -o /tmp/frame-perf-tests
-          mkdir -p /tmp/frame-perf-test-run
-          cd /tmp/frame-perf-test-run
-          /tmp/frame-perf-tests --test-threads=1
+          python3 tools/test_cart_diagnostic.py
 
       - name: Install clang 21
         run: curl https://apt.llvm.org/llvm.sh | sudo bash -s -- 21

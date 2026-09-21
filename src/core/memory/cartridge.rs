@@ -117,6 +117,20 @@ impl Emu {
     }
 
     pub fn cartridge_get_rom_ctrl(&mut self, cpu: CpuType) -> u32 {
+        if cpu != CpuType::ARM9 { return self.cartridge_get_rom_ctrl_inner(cpu); }
+        use crate::perf_diag as diag;
+        let previous = diag::enter_phase(diag::PHASE_CART_CTRL);
+        let ret = self.cartridge_get_rom_ctrl_inner(cpu);
+        diag::record_cart(diag::CART_CTRL_READS, 1);
+        if ret & (1 << 31) != 0 {
+            diag::record_cart(diag::CART_CTRL_BUSY, 1);
+            if ret & (1 << 23) == 0 { diag::record_cart(diag::CART_CTRL_NOT_READY, 1); }
+        }
+        diag::restore_arm9_state(previous);
+        ret
+    }
+
+    fn cartridge_get_rom_ctrl_inner(&mut self, cpu: CpuType) -> u32 {
         let ret = self.cartridge.inner[cpu].rom_ctrl.into();
         if !self.cartridge.inner[cpu].rom_ctrl.data_word_status() && self.cartridge.inner[cpu].rom_ctrl.block_start_status() {
             // Some games break when data word status is always on
@@ -127,6 +141,25 @@ impl Emu {
     }
 
     pub fn cartridge_get_rom_data_in(&mut self, cpu: CpuType) -> u32 {
+        if cpu != CpuType::ARM9 { return self.cartridge_get_rom_data_in_inner(cpu); }
+        use crate::perf_diag as diag;
+        let previous = diag::enter_phase(diag::PHASE_CART_DATA);
+        diag::record_cart(diag::CART_DATA_READS, 1);
+        let inner = &self.cartridge.inner[cpu];
+        if inner.rom_ctrl.data_word_status() && inner.rom_ctrl.block_start_status() {
+            diag::record_cart(diag::CART_DATA_WORDS, 1);
+            if inner.read_count as u32 + 4 == inner.block_size as u32 {
+                diag::record_cart(diag::CART_COMPLETIONS, 1);
+            }
+        } else {
+            diag::record_cart(diag::CART_DATA_REJECTED, 1);
+        }
+        let ret = self.cartridge_get_rom_data_in_inner(cpu);
+        diag::restore_arm9_state(previous);
+        ret
+    }
+
+    fn cartridge_get_rom_data_in_inner(&mut self, cpu: CpuType) -> u32 {
         let inner = &mut self.cartridge.inner[cpu];
         if !inner.rom_ctrl.data_word_status() || !inner.rom_ctrl.block_start_status() {
             if inner.rom_ctrl.block_start_status() {
@@ -310,7 +343,22 @@ impl Emu {
         self.cartridge.inner[cpu].bus_cmd_out = (self.cartridge.inner[cpu].bus_cmd_out & !((mask as u64) << 32)) | ((value & mask) as u64) << 32;
     }
 
-    pub fn cartridge_set_rom_ctrl(&mut self, cpu: CpuType, mut mask: u32, value: u32) {
+    pub fn cartridge_set_rom_ctrl(&mut self, cpu: CpuType, mask: u32, value: u32) {
+        if cpu != CpuType::ARM9 { return self.cartridge_set_rom_ctrl_inner(cpu, mask, value); }
+        use crate::perf_diag as diag;
+        let previous = diag::enter_phase(diag::PHASE_CART_START);
+        let transfer = !self.cartridge.inner[cpu].rom_ctrl.block_start_status() && value & (1 << 31) != 0;
+        self.cartridge_set_rom_ctrl_inner(cpu, mask, value);
+        if transfer {
+            let size = self.cartridge.inner[cpu].block_size as u32;
+            diag::record_cart(diag::CART_TRANSFERS, 1);
+            diag::record_cart(diag::CART_REQUESTED_BYTES, size);
+            if size == 0 { diag::record_cart(diag::CART_COMPLETIONS, 1); }
+        }
+        diag::restore_arm9_state(previous);
+    }
+
+    fn cartridge_set_rom_ctrl_inner(&mut self, cpu: CpuType, mut mask: u32, value: u32) {
         let new_rom_ctrl = RomCtrl::from(value);
         let inner = &mut self.cartridge.inner[cpu];
 

@@ -142,7 +142,7 @@ unsafe fn hle_post_function<const CPU: CpuType>(asm: &mut JitAsm, cycles: u32, g
 
 unsafe extern "C" fn hle_mi_cpu_clear32<const CPU: CpuType>(guest_pc: u32) {
     if CPU == ARM9 {
-        crate::perf_diag::publish_arm9_pc(guest_pc);
+        crate::perf_diag::publish_arm9_state(guest_pc, crate::perf_diag::PHASE_HLE);
     }
     let asm = get_jit_asm_ptr::<CPU>().as_mut_unchecked();
     let regs = CPU.thread_regs();
@@ -159,7 +159,7 @@ unsafe extern "C" fn hle_mi_cpu_clear32<const CPU: CpuType>(guest_pc: u32) {
 
 unsafe extern "C" fn hle_mi_cpu_clear16<const CPU: CpuType>(guest_pc: u32) {
     if CPU == ARM9 {
-        crate::perf_diag::publish_arm9_pc(guest_pc);
+        crate::perf_diag::publish_arm9_state(guest_pc, crate::perf_diag::PHASE_HLE);
     }
     let asm = get_jit_asm_ptr::<CPU>().as_mut_unchecked();
     let regs = CPU.thread_regs();
@@ -176,7 +176,7 @@ unsafe extern "C" fn hle_mi_cpu_clear16<const CPU: CpuType>(guest_pc: u32) {
 
 unsafe extern "C" fn hle_mi_cpu_copy32<const CPU: CpuType>(guest_pc: u32) {
     if CPU == ARM9 {
-        crate::perf_diag::publish_arm9_pc(guest_pc);
+        crate::perf_diag::publish_arm9_state(guest_pc, crate::perf_diag::PHASE_HLE);
     }
     let asm = get_jit_asm_ptr::<CPU>().as_mut_unchecked();
     let regs = CPU.thread_regs();
@@ -204,7 +204,7 @@ unsafe extern "C" fn hle_mi_cpu_copy32<const CPU: CpuType>(guest_pc: u32) {
 
 unsafe extern "C" fn hle_mi_cpu_send32<const CPU: CpuType>(guest_pc: u32) {
     if CPU == ARM9 {
-        crate::perf_diag::publish_arm9_pc(guest_pc);
+        crate::perf_diag::publish_arm9_state(guest_pc, crate::perf_diag::PHASE_HLE);
     }
     let asm = get_jit_asm_ptr::<CPU>().as_mut_unchecked();
     let regs = CPU.thread_regs();
@@ -236,7 +236,7 @@ unsafe extern "C" fn hle_mi_cpu_send32<const CPU: CpuType>(guest_pc: u32) {
 
 unsafe extern "C" fn hle_mi_cpu_copy16<const CPU: CpuType>(guest_pc: u32) {
     if CPU == ARM9 {
-        crate::perf_diag::publish_arm9_pc(guest_pc);
+        crate::perf_diag::publish_arm9_state(guest_pc, crate::perf_diag::PHASE_HLE);
     }
     let asm = get_jit_asm_ptr::<CPU>().as_mut_unchecked();
     let regs = CPU.thread_regs();
@@ -264,7 +264,7 @@ unsafe extern "C" fn hle_mi_cpu_copy16<const CPU: CpuType>(guest_pc: u32) {
 
 unsafe extern "C" fn hle_mi_copy64b<const CPU: CpuType>(guest_pc: u32) {
     if CPU == ARM9 {
-        crate::perf_diag::publish_arm9_pc(guest_pc);
+        crate::perf_diag::publish_arm9_state(guest_pc, crate::perf_diag::PHASE_HLE);
     }
     let asm = get_jit_asm_ptr::<CPU>().as_mut_unchecked();
     let regs = CPU.thread_regs();
@@ -296,7 +296,7 @@ unsafe extern "C" fn hle_mi_copy64b<const CPU: CpuType>(guest_pc: u32) {
 
 unsafe extern "C" fn hle_mi_cpu_clearfast<const CPU: CpuType>(guest_pc: u32) {
     if CPU == ARM9 {
-        crate::perf_diag::publish_arm9_pc(guest_pc);
+        crate::perf_diag::publish_arm9_state(guest_pc, crate::perf_diag::PHASE_HLE);
     }
     let asm = get_jit_asm_ptr::<CPU>().as_mut_unchecked();
     let regs = CPU.thread_regs();
@@ -313,7 +313,7 @@ unsafe extern "C" fn hle_mi_cpu_clearfast<const CPU: CpuType>(guest_pc: u32) {
 
 unsafe extern "C" fn hle_mi_cpu_fill8<const CPU: CpuType>(guest_pc: u32) {
     if CPU == ARM9 {
-        crate::perf_diag::publish_arm9_pc(guest_pc);
+        crate::perf_diag::publish_arm9_state(guest_pc, crate::perf_diag::PHASE_HLE);
     }
     let asm = get_jit_asm_ptr::<CPU>().as_mut_unchecked();
     let regs = CPU.thread_regs();
@@ -329,7 +329,7 @@ unsafe extern "C" fn hle_mi_cpu_fill8<const CPU: CpuType>(guest_pc: u32) {
 }
 
 unsafe extern "C" fn hle_gx_fifo_nop_clear128(guest_pc: u32) {
-    crate::perf_diag::publish_arm9_pc(guest_pc);
+    crate::perf_diag::publish_arm9_state(guest_pc, crate::perf_diag::PHASE_HLE);
     let asm = get_jit_asm_ptr::<{ ARM9 }>().as_mut_unchecked();
     let regs = ARM9.thread_regs();
     let dst = regs.gp_regs[0];
@@ -343,7 +343,7 @@ unsafe extern "C" fn hle_gx_fifo_nop_clear128(guest_pc: u32) {
 }
 
 unsafe extern "C" fn hle_gx_fifo_send64b(guest_pc: u32) {
-    crate::perf_diag::publish_arm9_pc(guest_pc);
+    crate::perf_diag::publish_arm9_state(guest_pc, crate::perf_diag::PHASE_HLE);
     let asm = get_jit_asm_ptr::<{ ARM9 }>().as_mut_unchecked();
     let regs = ARM9.thread_regs();
     let src = regs.gp_regs[0];
@@ -369,7 +369,7 @@ unsafe extern "C" fn hle_gx_fifo_send64b(guest_pc: u32) {
 }
 
 unsafe extern "C" fn hle_gx_fifo_send48b(guest_pc: u32) {
-    crate::perf_diag::publish_arm9_pc(guest_pc);
+    crate::perf_diag::publish_arm9_state(guest_pc, crate::perf_diag::PHASE_HLE);
     let asm = get_jit_asm_ptr::<{ ARM9 }>().as_mut_unchecked();
     let regs = ARM9.thread_regs();
     let src = regs.gp_regs[0];
@@ -395,7 +395,7 @@ unsafe extern "C" fn hle_gx_fifo_send48b(guest_pc: u32) {
 }
 
 unsafe extern "C" fn hle_gx_fifo_send128b(guest_pc: u32) {
-    crate::perf_diag::publish_arm9_pc(guest_pc);
+    crate::perf_diag::publish_arm9_state(guest_pc, crate::perf_diag::PHASE_HLE);
     let asm = get_jit_asm_ptr::<{ ARM9 }>().as_mut_unchecked();
     let regs = ARM9.thread_regs();
     let src = regs.gp_regs[0];
@@ -421,7 +421,7 @@ unsafe extern "C" fn hle_gx_fifo_send128b(guest_pc: u32) {
 }
 
 unsafe extern "C" fn hle_cp_save_context(guest_pc: u32) {
-    crate::perf_diag::publish_arm9_pc(guest_pc);
+    crate::perf_diag::publish_arm9_state(guest_pc, crate::perf_diag::PHASE_HLE);
     let asm = get_jit_asm_ptr::<{ ARM9 }>().as_mut_unchecked();
     let regs = ARM9.thread_regs();
     let cp_context_addr = regs.gp_regs[0];
@@ -439,7 +439,7 @@ unsafe extern "C" fn hle_cp_save_context(guest_pc: u32) {
 }
 
 unsafe extern "C" fn hle_cp_restore_context(guest_pc: u32) {
-    crate::perf_diag::publish_arm9_pc(guest_pc);
+    crate::perf_diag::publish_arm9_state(guest_pc, crate::perf_diag::PHASE_HLE);
     let asm = get_jit_asm_ptr::<{ ARM9 }>().as_mut_unchecked();
     let regs = ARM9.thread_regs();
     let cp_context_addr = regs.gp_regs[0];
@@ -456,7 +456,7 @@ unsafe extern "C" fn hle_cp_restore_context(guest_pc: u32) {
 }
 
 unsafe extern "C" fn hle_os_irqhandler(guest_pc: u32) {
-    crate::perf_diag::publish_arm9_pc(guest_pc);
+    crate::perf_diag::publish_arm9_state(guest_pc, crate::perf_diag::PHASE_HLE);
     let asm = get_jit_asm_ptr::<{ ARM9 }>().as_mut_unchecked();
     let regs = ARM9.thread_regs();
 
@@ -510,19 +510,19 @@ unsafe extern "C" fn fs_clear_overlay_image_hook() {
 }
 
 unsafe extern "C" fn hle_microcode_shakehand(guest_pc: u32) {
-    crate::perf_diag::publish_arm9_pc(guest_pc);
+    crate::perf_diag::publish_arm9_state(guest_pc, crate::perf_diag::PHASE_HLE);
     let asm = get_jit_asm_ptr::<{ ARM9 }>().as_mut_unchecked();
     hle_post_function::<{ ARM9 }>(asm, 20, guest_pc);
 }
 
 unsafe extern "C" fn hle_microcode_wait_agreement(guest_pc: u32) {
-    crate::perf_diag::publish_arm9_pc(guest_pc);
+    crate::perf_diag::publish_arm9_state(guest_pc, crate::perf_diag::PHASE_HLE);
     let asm = get_jit_asm_ptr::<{ ARM9 }>().as_mut_unchecked();
     hle_post_function::<{ ARM9 }>(asm, 7, guest_pc);
 }
 
 unsafe extern "C" fn hle_lcrng_step(guest_pc: u32) {
-    crate::perf_diag::publish_arm9_pc(guest_pc);
+    crate::perf_diag::publish_arm9_state(guest_pc, crate::perf_diag::PHASE_HLE);
     let asm = get_jit_asm_ptr::<{ ARM9 }>().as_mut_unchecked();
     let regs = ARM9.thread_regs();
     let ctx_addr = regs.gp_regs[0];
@@ -539,7 +539,7 @@ unsafe extern "C" fn hle_lcrng_step(guest_pc: u32) {
 }
 
 unsafe extern "C" fn hle_lcrng_crypt16(guest_pc: u32) {
-    crate::perf_diag::publish_arm9_pc(guest_pc);
+    crate::perf_diag::publish_arm9_state(guest_pc, crate::perf_diag::PHASE_HLE);
     let asm = get_jit_asm_ptr::<{ ARM9 }>().as_mut_unchecked();
     let regs = ARM9.thread_regs();
     let buf_addr = regs.gp_regs[0];

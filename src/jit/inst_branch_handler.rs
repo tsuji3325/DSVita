@@ -12,6 +12,7 @@ use std::mem;
 
 pub extern "C" fn run_scheduler<const ARM7_HLE: bool>(asm: *mut JitAsm, current_pc: u32) {
     let asm = unsafe { asm.as_mut_unchecked() };
+    let diagnostic_state = crate::perf_diag::enter_phase(crate::perf_diag::PHASE_SCHEDULER);
     debug_println!("{ARM9:?} run scheduler at {current_pc:x} target pc {:x}", ARM9.thread_regs().pc);
 
     let cycles = if ARM7_HLE {
@@ -37,9 +38,11 @@ pub extern "C" fn run_scheduler<const ARM7_HLE: bool>(asm: *mut JitAsm, current_
     }
     asm.emu.regs_3d_run_cmds(asm.emu.cm.get_cycles());
     asm.emu.breakout_imm = false;
+    crate::perf_diag::restore_arm9_state(diagnostic_state);
 }
 
 fn run_scheduler_idle_loop<const ARM7_HLE: bool>(asm: &mut JitAsm) {
+    let diagnostic_state = crate::perf_diag::enter_phase(crate::perf_diag::PHASE_SCHEDULER);
     if ARM7_HLE {
         asm.emu.cm.jump_to_next_event();
     } else {
@@ -58,6 +61,7 @@ fn run_scheduler_idle_loop<const ARM7_HLE: bool>(asm: &mut JitAsm) {
         jit_asm_arm7.runtime_data.set_idle_loop(false);
     }
     asm.emu.regs_3d_run_cmds(asm.emu.cm.get_cycles());
+    crate::perf_diag::restore_arm9_state(diagnostic_state);
 }
 
 // Outlined so the depth guard costs its callers one compare + never-taken branch of
@@ -86,6 +90,7 @@ pub fn check_stack_depth(asm: &mut JitAsm, current_pc: u32) {
 #[inline(never)]
 pub extern "C" fn handle_interrupt(asm: *mut JitAsm, target_pc: u32, current_pc: u32) {
     let asm = unsafe { asm.as_mut_unchecked() };
+    let diagnostic_state = crate::perf_diag::enter_phase(crate::perf_diag::PHASE_DISPATCH);
     check_stack_depth(asm, current_pc);
 
     let pc = ARM9.thread_regs().pc;
@@ -102,6 +107,7 @@ pub extern "C" fn handle_interrupt(asm: *mut JitAsm, target_pc: u32, current_pc:
     unsafe { call_jit_entry(pc | (thumb as u32), jit_entry as _, &mut asm.runtime_data.interrupt_sp) };
     debug_println!("return from interrupt");
     asm.runtime_data.set_in_interrupt(false);
+    crate::perf_diag::restore_arm9_state(diagnostic_state);
 }
 
 fn flush_cycles<const CPU: CpuType>(asm: &mut JitAsm, total_cycles: u16, current_pc: u32) {
