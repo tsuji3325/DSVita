@@ -682,6 +682,7 @@ fn emit_code_block_internal(asm: &mut JitAsm, guest_pc: u32, thumb: bool) {
     }
 
     if asm.cpu == ARM9 { crate::perf_diag::publish_arm9_state(guest_pc, crate::perf_diag::PHASE_COMPILE); }
+    let decode_start = crate::compile_diag::clock(asm.cpu == ARM9);
     asm.jit_buf.clear_all();
     let guest_pc_end = JitAsm::fill_jit_insts_buf(asm.cpu, &mut asm.jit_buf.insts, &mut asm.jit_buf.insts_cycle_counts, asm.emu, guest_pc, thumb, is_os_irq_handler);
     debug_assert!(
@@ -689,6 +690,9 @@ fn emit_code_block_internal(asm: &mut JitAsm, guest_pc: u32, thumb: bool) {
         "{:?} compiling empty block at {guest_pc:x} thumb {thumb}: execution reached undefined code",
         asm.cpu,
     );
+
+    let decode_us = crate::compile_diag::elapsed(decode_start);
+    if asm.cpu == ARM9 { crate::compile_diag::decoded(guest_pc | thumb as u32, decode_us); }
 
     if asm.cpu == ARM9 && is_os_irq_handler && asm.emit_hle_os_irq_handler(guest_pc, thumb) {
         return;
@@ -700,10 +704,13 @@ fn emit_code_block_internal(asm: &mut JitAsm, guest_pc: u32, thumb: bool) {
 
     debug_println!("{:?} {thumb} emit code block {guest_pc:x} - {guest_pc_end:x}", asm.cpu);
 
+    let analyze_start = crate::compile_diag::clock(asm.cpu == ARM9);
     asm.analyzer.analyze(guest_pc, &asm.jit_buf.insts, thumb);
     asm.jit_buf.guest_pc_start = guest_pc;
     asm.jit_buf.debug_info.resize(asm.analyzer.basic_blocks.len(), asm.jit_buf.insts.len());
 
+    let analyze_us = crate::compile_diag::elapsed(analyze_start);
+    let emit_start = crate::compile_diag::clock(asm.cpu == ARM9);
     let (jit_entry, flushed) = {
         let pc_step = if thumb { 2 } else { 4 };
         let mut block_asm = BlockAsm::new(asm.cpu, thumb, is_os_irq_handler);
@@ -736,7 +743,14 @@ fn emit_code_block_internal(asm: &mut JitAsm, guest_pc: u32, thumb: bool) {
 
         block_asm.finalize();
 
+        let emit_us = crate::compile_diag::elapsed(emit_start);
+        let host_bytes = block_asm.get_code_buffer().len();
+        let insert_start = crate::compile_diag::clock(asm.cpu == ARM9);
         let (insert_entry, flushed) = asm.emu.jit_insert_block(block_asm, &asm.jit_buf.debug_info, guest_pc, guest_pc_end + pc_step, thumb, asm.cpu);
+        let insert_us = crate::compile_diag::elapsed(insert_start);
+        if asm.cpu == ARM9 {
+            crate::compile_diag::compiled(guest_pc | thumb as u32, guest_pc_end + pc_step, host_bytes, [decode_us, analyze_us, emit_us, insert_us], crate::perf_diag::overlay_hint());
+        }
         let jit_entry: extern "C" fn(u32) = unsafe { mem::transmute(insert_entry) };
         asm.runtime_data.pre_cycle_count_sum = 0;
         (jit_entry, flushed)

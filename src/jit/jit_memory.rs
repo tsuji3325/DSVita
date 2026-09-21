@@ -687,9 +687,11 @@ impl JitMemory {
     }
 
     fn reset_blocks(&mut self, cpu_type: CpuType) {
+        if cpu_type == ARM9 { crate::compile_diag::eviction_batch(); }
         self.jit_perf_map_record.reset();
 
         let block_metadata = self.get_jit_data(cpu_type).jit_funcs.pop_front().unwrap();
+        if cpu_type == ARM9 { crate::compile_diag::invalidated(block_metadata.guest_pc, (block_metadata.guest_pc_end - block_metadata.guest_pc) as usize, crate::compile_diag::EVICTION); }
         self.jit_memory_map
             .write_jit_entries(block_metadata.guest_pc, (block_metadata.guest_pc_end - block_metadata.guest_pc) as usize, DEFAULT_JIT_ENTRY);
         for i in block_metadata.addr_offset_start..block_metadata.addr_offset_end {
@@ -714,6 +716,7 @@ impl JitMemory {
             let guest_pc = block_metadata.guest_pc;
             let guest_block_size = (block_metadata.guest_pc_end - block_metadata.guest_pc) as usize;
 
+            if cpu_type == ARM9 { crate::compile_diag::invalidated(guest_pc, guest_block_size, crate::compile_diag::EVICTION); }
             self.jit_memory_map.write_jit_entries(guest_pc, guest_block_size, DEFAULT_JIT_ENTRY);
             for i in addr_offset_start..addr_offset_end {
                 self.guest_inst_metadata[i as usize].clear();
@@ -799,6 +802,7 @@ impl JitMemory {
                     *live_range &= !(1 << live_ranges_bit);
                     let guest_addr_start = $guest_addr & !(JIT_LIVE_RANGE_PAGE_SIZE - 1);
                     debug_println!("Invalidating jit {guest_addr_start:x} - {:x}", guest_addr_start + JIT_LIVE_RANGE_PAGE_SIZE);
+                    crate::compile_diag::invalidated(guest_addr_start, JIT_LIVE_RANGE_PAGE_SIZE as usize, crate::compile_diag::WRITE);
                     self.jit_memory_map.write_jit_entries(guest_addr_start, JIT_LIVE_RANGE_PAGE_SIZE as usize, DEFAULT_JIT_ENTRY);
                 }
             }};
@@ -817,6 +821,7 @@ impl JitMemory {
             if unlikely(*live_range & (1 << live_ranges_bit) != 0) {
                 *live_range &= !(1 << live_ranges_bit);
                 debug_println!("Invalidating multiple jit {addr:x} - {:x}", addr + JIT_LIVE_RANGE_PAGE_SIZE);
+                crate::compile_diag::invalidated(addr, JIT_LIVE_RANGE_PAGE_SIZE as usize, crate::compile_diag::OVERLAY);
                 self.jit_memory_map.write_jit_entries(addr, JIT_LIVE_RANGE_PAGE_SIZE as usize, DEFAULT_JIT_ENTRY);
             }
         }
@@ -825,6 +830,7 @@ impl JitMemory {
     pub fn invalidate_vram(&mut self) {
         for live_range in self.jit_live_ranges.vram.deref() {
             if *live_range != 0 {
+                crate::compile_diag::invalidated(0x06000000, 0x01000000, crate::compile_diag::VRAM);
                 self.jit_entries.vram.fill(DEFAULT_JIT_ENTRY);
                 self.jit_live_ranges.vram.fill(0);
                 return;
