@@ -183,9 +183,18 @@ macro_rules! write_itcm {
 }
 
 macro_rules! write_main {
-    ($addr:expr, $size:expr, $emu:expr, $shm_offset:ident, $write:block) => {{
+    ($cpu:expr, $addr:expr, $size:expr, $emu:expr, $shm_offset:ident, $write:block) => {{
         let $shm_offset = regions::MAIN_REGION.shm_offset as u32 + ($addr & (regions::MAIN_SIZE - 1));
+        let diagnostic_before = if crate::write_diag::touches($addr, $size) {
+            let offset = regions::MAIN_REGION.shm_offset + crate::write_diag::OFFSET;
+            Some(crate::write_diag::capture(&$emu.mem.shm[offset..offset + crate::write_diag::LEN]))
+        } else { None };
         $write;
+        if let Some(before) = diagnostic_before {
+            let offset = regions::MAIN_REGION.shm_offset + crate::write_diag::OFFSET;
+            let invalidating = $emu.jit.diagnostic_target_live_invalidation($addr, $size);
+            crate::write_diag::written($addr, $size, $cpu == ARM9, crate::perf_diag::source_hint(), crate::perf_diag::overlay_hint(), before, &$emu.mem.shm[offset..offset + crate::write_diag::LEN], invalidating);
+        }
         $emu.jit.invalidate_block($addr, $size);
     }};
 }
@@ -291,7 +300,7 @@ impl<const CPU: CpuType, const TCM: bool, T: Convert> MemoryIo<CPU, TCM, T> {
     }
 
     fn write_main(addr: u32, value: T, emu: &mut Emu) {
-        write_main!(addr, size_of::<T>(), emu, shm_offset, { utils::write_to_mem(&mut emu.mem.shm, shm_offset, value) });
+        write_main!(CPU, addr, size_of::<T>(), emu, shm_offset, { utils::write_to_mem(&mut emu.mem.shm, shm_offset, value) });
     }
 
     fn write_wram(addr: u32, value: T, emu: &mut Emu) {
@@ -432,7 +441,7 @@ impl<const CPU: CpuType, const TCM: bool, T: Convert> MemoryMultipleSliceIo<CPU,
     }
 
     fn write_main(addr: u32, slice: &[T], emu: &mut Emu) {
-        write_main!(addr, size_of_val(slice), emu, shm_offset, {
+        write_main!(CPU, addr, size_of_val(slice), emu, shm_offset, {
             utils::write_to_mem_slice(&mut emu.mem.shm, shm_offset as usize, slice);
         });
     }
@@ -573,7 +582,7 @@ impl<const CPU: CpuType, const TCM: bool, T: Convert> MemoryFixedSliceIo<CPU, TC
     }
 
     fn write_main(addr: u32, slice: &[T], emu: &mut Emu) {
-        write_main!(addr, size_of_val(slice), emu, shm_offset, {
+        write_main!(CPU, addr, size_of_val(slice), emu, shm_offset, {
             utils::write_to_mem(&mut emu.mem.shm, shm_offset, unsafe { slice.last().unwrap_unchecked() });
         });
     }
@@ -641,7 +650,7 @@ impl<const CPU: CpuType, const TCM: bool, T: Convert> MemoryMultipleMemsetIo<CPU
 
     fn write_main(addr: u32, value: T, size: usize, emu: &mut Emu) {
         let write_shift = size_of::<T>() >> 1;
-        write_main!(addr, size << write_shift, emu, shm_offset, {
+        write_main!(CPU, addr, size << write_shift, emu, shm_offset, {
             utils::write_memset(&mut emu.mem.shm, shm_offset as usize, value, size);
         });
     }

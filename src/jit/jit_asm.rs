@@ -751,6 +751,10 @@ fn emit_code_block_internal(asm: &mut JitAsm, guest_pc: u32, thumb: bool) {
         if asm.cpu == ARM9 {
             crate::compile_diag::compiled(guest_pc | thumb as u32, guest_pc_end + pc_step, host_bytes, [decode_us, analyze_us, emit_us, insert_us], crate::perf_diag::overlay_hint());
         }
+        if asm.cpu == ARM9 && guest_pc == crate::write_diag::TARGET {
+            let offset = regions::MAIN_REGION.shm_offset + crate::write_diag::OFFSET;
+            crate::write_diag::compiled(guest_pc_end + pc_step, thumb, &asm.emu.mem.shm[offset..offset + crate::write_diag::LEN]);
+        }
         let jit_entry: extern "C" fn(u32) = unsafe { mem::transmute(insert_entry) };
         asm.runtime_data.pre_cycle_count_sum = 0;
         (jit_entry, flushed)

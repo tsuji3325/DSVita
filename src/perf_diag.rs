@@ -182,6 +182,7 @@ fn merge_histogram(target: &Mutex<BTreeMap<u64, u32>>, source: &BTreeMap<u64, u3
 
 pub(crate) fn reset() {
     crate::compile_diag::reset();
+    crate::write_diag::reset();
     for stat in &STATS {
         stat.store(0, Ordering::Relaxed);
     }
@@ -208,6 +209,8 @@ pub(crate) fn replace_arm9_pc(pc: u32) -> u32 {
 }
 
 #[inline]
+pub(crate) fn source_hint() -> u32 { CURRENT_ARM9_PC.load(Ordering::Relaxed) }
+
 pub(crate) fn overlay_hint() -> u32 { LAST_OVERLAY_EVENT_ID.load(Ordering::Relaxed) }
 
 pub(crate) fn set_overlay_event_id(id: u32) {
@@ -426,7 +429,7 @@ pub(crate) fn write_report() {
 
     let mut report = format!(
         concat!(
-            "report_version=5\n",
+            "report_version=6\n",
             "pc_source=arm9_jit_block_boundary_and_interpreter_entry pc_note=last_guest_boundary_includes_host_helpers_not_instruction_exact\n",
             "slow_threshold_us={} pc_sample_interval_ms=1 pc_bucket_size={} overlay_hint_note=last_FS_ClearOverlayImage_event_not_ownership\n",
             "cpu_frames={} cpu_avg_us={} cpu_max_us={} cpu_slow_frames={} cpu_slow_avg_us={} cpu_slow_max_us={}\n",
@@ -502,6 +505,7 @@ pub(crate) fn write_report() {
     }
 
     crate::compile_diag::append_report(&mut report);
+    crate::write_diag::append_report(&mut report);
     #[cfg(target_os = "vita")]
     {
         let _ = std::fs::create_dir_all("ux0:data/dsvita");
@@ -594,7 +598,7 @@ mod tests {
         assert!(!std::path::Path::new("frame_perf.log").exists());
         write_report();
         let report = std::fs::read_to_string("frame_perf.log").unwrap();
-        assert!(report.contains("report_version=5"));
+        assert!(report.contains("report_version=6"));
         assert!(report.contains("cpu_slow_frames=1"));
         assert!(report.contains("[top_slow_pc_buckets]"));
         assert!(report.contains("[slow_phase_samples]"));

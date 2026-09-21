@@ -73,6 +73,7 @@ mod mmap;
 mod presenter;
 mod perf_diag;
 mod compile_diag;
+mod write_diag;
 mod ra_context;
 mod savestate;
 mod screen_layouts;

@@ -792,6 +792,15 @@ impl JitMemory {
         unsafe { (*self.jit_memory_map.get_jit_entry(guest_pc)).0 }
     }
 
+    pub(crate) fn diagnostic_target_live_invalidation(&self, addr: u32, size: usize) -> bool {
+        if size == 0 { return false; }
+        [addr, addr.wrapping_add(size as u32).wrapping_sub(1)].into_iter().any(|a| {
+            if !crate::write_diag::watched_page(a) { return false; }
+            let live = unsafe { *self.jit_memory_map.get_live_range(a) };
+            live & (1 << ((a >> JIT_LIVE_RANGE_PAGE_SIZE_SHIFT) & 7)) != 0
+        })
+    }
+
     #[inline(never)]
     pub fn invalidate_block(&mut self, guest_addr: u32, size: usize) {
         macro_rules! invalidate {
