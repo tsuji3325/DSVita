@@ -693,7 +693,6 @@ fn emit_code_block_internal(asm: &mut JitAsm, guest_pc: u32, thumb: bool) {
 
     // Include HLE candidates, even when they bypass native block registration.
     asm.emu.jit.main_code_footprint.mark(guest_pc, (guest_pc_end - guest_pc + if thumb { 2 } else { 4 }) as usize);
-    crate::dependency_diag::mark(guest_pc, (guest_pc_end - guest_pc + if thumb { 2 } else { 4 }) as usize, crate::dependency_diag::CODE, guest_pc);
     let decode_us = crate::compile_diag::elapsed(decode_start);
     if asm.cpu == ARM9 { crate::compile_diag::decoded(guest_pc | thumb as u32, decode_us); }
 
@@ -706,6 +705,35 @@ fn emit_code_block_internal(asm: &mut JitAsm, guest_pc: u32, thumb: bool) {
     }
 
     debug_println!("{:?} {thumb} emit code block {guest_pc:x} - {guest_pc_end:x}", asm.cpu);
+
+    // Keep fresh decoding, threshold handling and SDK substitutions above this gate.
+    // Exclude all PC-relative memory operands: their emitted constants/mappings
+    // can depend on data outside the decoded code. No such dependencies are reused.
+    #[cfg(target_arch = "arm")]
+    let reuse_key = if asm.cpu == ARM9 && !thumb && crate::reuse_cache::TARGETS.contains(&guest_pc) {
+        if !is_os_irq_handler && asm.emu.fs_clear_overlay_image_addr != 0
+            && asm.emu.fs_clear_overlay_image_addr != guest_pc
+            && asm.jit_buf.insts.iter().enumerate().all(|(i, inst)| inst.imm_transfer_addr(guest_pc + i as u32 * 4).is_none()) {
+            Some(crate::reuse_cache::Key {
+                pc: guest_pc, end: guest_pc_end + 4,
+                context: [asm.emu.settings.arm7_emu() as u32, asm.emu.fs_clear_overlay_image_addr],
+                instructions: asm.jit_buf.insts.iter().zip(&asm.jit_buf.insts_cycle_counts).map(|(i, c)| (i.opcode, *c)).collect(),
+            })
+        } else { crate::reuse_cache::excluded(); None }
+    } else { None };
+    #[cfg(target_arch = "arm")]
+    if let Some(key) = &reuse_key {
+        if let Some(offset) = asm.emu.jit.reuse_cache.lookup(key, &asm.emu.jit.mem) {
+            let entry = asm.emu.jit_restore_reuse(guest_pc, guest_pc_end + 4, offset);
+            // No owned key or cache borrow may survive execution (guest longjmp).
+            drop(reuse_key);
+            asm.runtime_data.pre_cycle_count_sum = 0;
+            crate::perf_diag::publish_arm9_state(guest_pc, crate::perf_diag::PHASE_JIT);
+            let entry: extern "C" fn(u32) = unsafe { mem::transmute(entry) };
+            entry(guest_pc);
+            return;
+        }
+    }
 
     let analyze_start = crate::compile_diag::clock(asm.cpu == ARM9);
     asm.analyzer.analyze(guest_pc, &asm.jit_buf.insts, thumb);
@@ -751,16 +779,13 @@ fn emit_code_block_internal(asm: &mut JitAsm, guest_pc: u32, thumb: bool) {
         let insert_start = crate::compile_diag::clock(asm.cpu == ARM9);
         let (insert_entry, flushed) = asm.emu.jit_insert_block(block_asm, &asm.jit_buf.debug_info, guest_pc, guest_pc_end + pc_step, thumb, asm.cpu);
         let insert_us = crate::compile_diag::elapsed(insert_start);
+        #[cfg(target_arch = "arm")]
+        if let Some(key) = reuse_key {
+            let offset = insert_entry as usize - asm.emu.jit.mem.as_ptr() as usize;
+            asm.emu.jit.reuse_cache.remember(key, offset, host_bytes, &asm.emu.jit.mem);
+        }
         if asm.cpu == ARM9 {
             crate::compile_diag::compiled(guest_pc | thumb as u32, guest_pc_end + pc_step, host_bytes, [decode_us, analyze_us, emit_us, insert_us], crate::perf_diag::overlay_hint());
-        }
-        if asm.cpu == ARM9 && guest_pc == crate::write_diag::TARGET {
-            let offset = regions::MAIN_REGION.shm_offset + crate::write_diag::OFFSET;
-            crate::write_diag::compiled(guest_pc_end + pc_step, thumb, &asm.emu.mem.shm[offset..offset + crate::write_diag::LEN]);
-        }
-        if asm.cpu == ARM9 && crate::dependency_diag::TARGETS.contains(&guest_pc) {
-            let offset = regions::MAIN_REGION.shm_offset + crate::dependency_diag::OFFSET;
-            crate::dependency_diag::compiled(guest_pc, guest_pc_end + pc_step, thumb, &asm.emu.mem.shm[offset..offset + crate::dependency_diag::LEN]);
         }
         let jit_entry: extern "C" fn(u32) = unsafe { mem::transmute(insert_entry) };
         asm.runtime_data.pre_cycle_count_sum = 0;

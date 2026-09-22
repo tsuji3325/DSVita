@@ -393,6 +393,7 @@ impl JitMemoryMetadata {
 }
 
 pub struct JitMemory {
+    pub(crate) reuse_cache: crate::reuse_cache::Cache,
     pub mem: Mmap,
     arm9_data: JitMemoryMetadata,
     arm7_data: JitMemoryMetadata,
@@ -411,6 +412,17 @@ pub struct JitMemory {
 }
 
 impl Emu {
+    #[cfg(target_arch = "arm")]
+    pub(crate) fn jit_restore_reuse(&mut self, pc: u32, end: u32, offset: usize) -> *const extern "C" fn(u32) {
+        let entry = (self.jit.mem.as_ptr() as usize + offset) as *const extern "C" fn(u32);
+        self.jit.jit_memory_map.write_jit_entries(pc, (end - pc) as usize, JitEntry(entry));
+        self.jit_set_live_range(pc, end, false);
+        // Re-establish the normal write backstop for both CPUs before execution.
+        self.jit_protect_region::<{ ARM9 }>(pc, end, false, &regions::MAIN_REGION);
+        self.jit_protect_region::<{ ARM7 }>(pc, end, false, &regions::MAIN_REGION);
+        entry
+    }
+
     pub fn jit_protect_region<const CPU: CpuType>(&mut self, guest_pc: u32, guest_pc_end: u32, thumb: bool, region: &MemRegion) {
         let guest_pc_end = guest_pc_end - if thumb { 2 } else { 4 };
         let begin = guest_pc >> MMU_PAGE_SHIFT;
@@ -422,7 +434,6 @@ impl Emu {
 
     pub fn jit_set_live_range(&mut self, guest_pc: u32, guest_pc_end: u32, thumb: bool) {
         self.jit.main_code_footprint.mark(guest_pc, (guest_pc_end - guest_pc) as usize);
-        crate::dependency_diag::mark(guest_pc, (guest_pc_end - guest_pc) as usize, crate::dependency_diag::CODE, guest_pc);
         // >> 3 for u8 (each bit represents a page)
         let guest_pc_end = guest_pc_end - if thumb { 2 } else { 4 };
         let live_range_begin = guest_pc >> JIT_LIVE_RANGE_PAGE_SIZE_SHIFT;
@@ -636,6 +647,7 @@ impl JitMemory {
         let jit_exec_counts = JitExecCounts::default();
         let jit_memory_map = JitMemoryMap::new(&jit_entries, &jit_live_ranges, &jit_exec_counts);
         JitMemory {
+            reuse_cache: Default::default(),
             mem: Mmap::executable("jit", JIT_MEMORY_SIZE).unwrap(),
             arm9_data: JitMemoryMetadata::default(),
             arm7_data: JitMemoryMetadata::default(),
@@ -655,6 +667,7 @@ impl JitMemory {
     }
 
     pub fn init(&mut self, settings: &Settings) {
+        self.reuse_cache.clear();
         self.arm9_data = if settings.arm7_emu() == Arm7Emu::Hle {
             JitMemoryMetadata::new(JIT_MEMORY_SIZE, 0, JIT_MEMORY_SIZE)
         } else {
@@ -667,7 +680,6 @@ impl JitMemory {
         };
         self.jit_entries.reset();
         self.main_code_footprint.clear();
-        crate::dependency_diag::clear_dependencies();
         self.jit_live_ranges.itcm.fill(0);
         self.jit_live_ranges.main.fill(0);
         self.jit_live_ranges.vram.fill(0);
@@ -693,6 +705,8 @@ impl JitMemory {
     }
 
     fn reset_blocks(&mut self, cpu_type: CpuType) {
+        // Before ANY allocation is retired, forget all saved native addresses.
+        self.reuse_cache.clear();
         if cpu_type == ARM9 { crate::compile_diag::eviction_batch(); }
         self.jit_perf_map_record.reset();
 

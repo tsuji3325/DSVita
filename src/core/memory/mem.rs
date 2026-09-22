@@ -185,25 +185,7 @@ macro_rules! write_itcm {
 macro_rules! write_main {
     ($cpu:expr, $addr:expr, $size:expr, $emu:expr, $shm_offset:ident, $write:block) => {{
         let $shm_offset = regions::MAIN_REGION.shm_offset as u32 + ($addr & (regions::MAIN_SIZE - 1));
-        let diagnostic_before = if crate::write_diag::touches($addr, $size) {
-            let offset = regions::MAIN_REGION.shm_offset + crate::write_diag::OFFSET;
-            Some(crate::write_diag::capture(&$emu.mem.shm[offset..offset + crate::write_diag::LEN]))
-        } else { None };
-        let dependency_before = if crate::dependency_diag::touches($addr, $size) {
-            let offset = regions::MAIN_REGION.shm_offset + crate::dependency_diag::OFFSET;
-            Some(crate::dependency_diag::capture(&$emu.mem.shm[offset..offset + crate::dependency_diag::LEN]))
-        } else { None };
         $write;
-        if let Some(before) = dependency_before {
-            let offset = regions::MAIN_REGION.shm_offset + crate::dependency_diag::OFFSET;
-            let (invalidating, reason) = $emu.jit.diagnostic_dependency_invalidation($addr, $size);
-            crate::dependency_diag::written($addr, $size, $cpu == ARM9, crate::perf_diag::source_hint(), crate::perf_diag::overlay_hint(), before, &$emu.mem.shm[offset..offset + crate::dependency_diag::LEN], invalidating, reason);
-        }
-        if let Some(before) = diagnostic_before {
-            let offset = regions::MAIN_REGION.shm_offset + crate::write_diag::OFFSET;
-            let invalidating = $emu.jit.diagnostic_target_live_invalidation($addr, $size);
-            crate::write_diag::written($addr, $size, $cpu == ARM9, crate::perf_diag::source_hint(), crate::perf_diag::overlay_hint(), before, &$emu.mem.shm[offset..offset + crate::write_diag::LEN], invalidating);
-        }
         $emu.jit.invalidate_block($addr, $size);
     }};
 }
