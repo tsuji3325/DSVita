@@ -24,6 +24,7 @@ struct Jit { calls:Vec<(u32,usize)> }
 impl Jit {
  fn invalidate_block(&mut self,a:u32,n:usize) {self.calls.push((a,n));}
  fn diagnostic_target_live_invalidation(&self,_a:u32,_n:usize)->bool {true}
+ fn diagnostic_dependency_invalidation(&self,_a:u32,_n:usize)->(bool,usize) {(true,2)}
 }
 struct Emu { mem:Mem,jit:Jit }
 impl Emu {fn new()->Self {Self{mem:Mem{shm:vec![0;0x400000]},jit:Jit::default()}}}
@@ -38,8 +39,9 @@ fn diagnostic(cpu:bool, addr:u32, span:usize, data:&[u8], emu:&mut Emu, effects:
 #[test]
 fn actual_write_macro_preserves_memory_effects_and_invalidation_arguments() {
  for cpu in [true,false] {
-  for (addr,span,len) in [(0x02010000,4,4),(0x0225F400,4,4),(0x0225F4F8,4,4),(0x0265F4F8,64,64),(0x0225F4F8,64,4),(0x0225F3F0,64,64),(0x0225F5FC,8,8)] {
+  for (addr,span,len) in [(0x0225E8CC,4,4),(0x0265E9B4,96,96),(0x02010000,4,4),(0x0225F400,4,4),(0x0225F4F8,4,4),(0x0265F4F8,64,64),(0x0225F4F8,64,4),(0x0225F3F0,64,64),(0x0225F5FC,8,8)] {
    crate::write_diag::reset();
+   crate::dependency_diag::reset();
    let mut a=Emu::new();let mut b=Emu::new();let mut ac=0;let mut bc=0;
    let off=crate::write_diag::OFFSET;
    crate::write_diag::compiled(0x0225F544,false,&b.mem.shm[off..off+crate::write_diag::LEN]);
@@ -58,6 +60,7 @@ fn actual_write_macro_preserves_memory_effects_and_invalidation_arguments() {
 with tempfile.TemporaryDirectory() as tmp:
     tmp=Path(tmp)
     module='\n#[path = '+repr(str(Path('src/write_diag.rs').resolve())).replace("'",'"')+'] mod write_diag;\n'
+    module += '\n#[path = '+repr(str(Path('src/dependency_diag.rs').resolve())).replace("'",'"')+'] mod dependency_diag;\n'
     source=tmp/'write_tests.rs'
     source.write_text(prefix+module+old.replace('write_main {','write_main_old {')+new+tests)
     executable=tmp/'write_tests'

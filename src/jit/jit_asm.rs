@@ -693,6 +693,7 @@ fn emit_code_block_internal(asm: &mut JitAsm, guest_pc: u32, thumb: bool) {
 
     // Include HLE candidates, even when they bypass native block registration.
     asm.emu.jit.main_code_footprint.mark(guest_pc, (guest_pc_end - guest_pc + if thumb { 2 } else { 4 }) as usize);
+    crate::dependency_diag::mark(guest_pc, (guest_pc_end - guest_pc + if thumb { 2 } else { 4 }) as usize, crate::dependency_diag::CODE, guest_pc);
     let decode_us = crate::compile_diag::elapsed(decode_start);
     if asm.cpu == ARM9 { crate::compile_diag::decoded(guest_pc | thumb as u32, decode_us); }
 
@@ -756,6 +757,10 @@ fn emit_code_block_internal(asm: &mut JitAsm, guest_pc: u32, thumb: bool) {
         if asm.cpu == ARM9 && guest_pc == crate::write_diag::TARGET {
             let offset = regions::MAIN_REGION.shm_offset + crate::write_diag::OFFSET;
             crate::write_diag::compiled(guest_pc_end + pc_step, thumb, &asm.emu.mem.shm[offset..offset + crate::write_diag::LEN]);
+        }
+        if asm.cpu == ARM9 && crate::dependency_diag::TARGETS.contains(&guest_pc) {
+            let offset = regions::MAIN_REGION.shm_offset + crate::dependency_diag::OFFSET;
+            crate::dependency_diag::compiled(guest_pc, guest_pc_end + pc_step, thumb, &asm.emu.mem.shm[offset..offset + crate::dependency_diag::LEN]);
         }
         let jit_entry: extern "C" fn(u32) = unsafe { mem::transmute(insert_entry) };
         asm.runtime_data.pre_cycle_count_sum = 0;

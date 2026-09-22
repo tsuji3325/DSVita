@@ -422,6 +422,7 @@ impl Emu {
 
     pub fn jit_set_live_range(&mut self, guest_pc: u32, guest_pc_end: u32, thumb: bool) {
         self.jit.main_code_footprint.mark(guest_pc, (guest_pc_end - guest_pc) as usize);
+        crate::dependency_diag::mark(guest_pc, (guest_pc_end - guest_pc) as usize, crate::dependency_diag::CODE, guest_pc);
         // >> 3 for u8 (each bit represents a page)
         let guest_pc_end = guest_pc_end - if thumb { 2 } else { 4 };
         let live_range_begin = guest_pc >> JIT_LIVE_RANGE_PAGE_SIZE_SHIFT;
@@ -666,6 +667,7 @@ impl JitMemory {
         };
         self.jit_entries.reset();
         self.main_code_footprint.clear();
+        crate::dependency_diag::clear_dependencies();
         self.jit_live_ranges.itcm.fill(0);
         self.jit_live_ranges.main.fill(0);
         self.jit_live_ranges.vram.fill(0);
@@ -803,6 +805,16 @@ impl JitMemory {
             let live = unsafe { *self.jit_memory_map.get_live_range(a) };
             live & (1 << ((a >> JIT_LIVE_RANGE_PAGE_SIZE_SHIFT) & 7)) != 0
         })
+    }
+
+    pub(crate) fn diagnostic_dependency_invalidation(&self, addr: u32, size: usize) -> (bool, usize) {
+        if size == 0 { return (false, 1); }
+        let reason = if self.main_code_footprint.can_preserve(addr, size) { 0 }
+            else if size > 256 - (addr as usize & 255) { 1 } else { 2 };
+        let live = [addr, addr.wrapping_add(size as u32).wrapping_sub(1)].into_iter().any(|a| {
+            crate::dependency_diag::watched_page(a) && self.jit_memory_map.has_jit_block(a)
+        });
+        (reason != 0 && live, reason)
     }
 
     #[inline(never)]

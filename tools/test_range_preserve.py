@@ -3,12 +3,17 @@ from pathlib import Path
 import subprocess
 import tempfile
 source=Path('src/jit/jit_memory.rs').read_text()
-def method(name):
- start=source.index('    pub fn '+name+'(')
- pos=source.index('{',start)+1; depth=1
+def method(name, text=source):
+ prefix='    pub fn '+name+'('
+ if prefix not in text: prefix='    pub(crate) fn '+name+'('
+ start=text.index(prefix)
+ pos=text.index('{',start)+1; depth=1
  while depth:
-  depth+=(source[pos]=='{')-(source[pos]=='}');pos+=1
- return source[start:pos]
+  depth+=(text[pos]=='{')-(text[pos]=='}');pos+=1
+ return text[start:pos]
+baseline=subprocess.check_output(['git','show','7cdbdbe733a96f55828f5b0860a7e52bc5a9e052:src/jit/jit_memory.rs'],text=True)
+for name in ['invalidate_block','invalidate_blocks']:
+ assert method(name)==method(name,baseline), 'Diagnostic build changed invalidation policy'
 prefix=r'''
 #![allow(dead_code)]
 use std::cell::UnsafeCell;
@@ -38,6 +43,16 @@ impl Emu {
 }
 '''
 tests=r'''
+#[test]
+fn dependency_reason_observer_agrees_with_actual_preservation_and_boundary_rules() {
+ let mut e=Emu::new();e.register(0x0225E8CC,0x0225E91C,false);
+ assert_eq!(e.jit.diagnostic_dependency_invalidation(0x0225E800,1),(false,0));
+ assert_eq!(e.jit.diagnostic_dependency_invalidation(0x0225E8CC,1),(true,2));
+ assert_eq!(e.jit.diagnostic_dependency_invalidation(0x0265E8CC,1),(true,2));
+ assert_eq!(e.jit.diagnostic_dependency_invalidation(0x0225E8FF,2),(true,1));
+ e.jit.invalidate_blocks(0x0225E800,512);
+ assert_eq!(e.jit.diagnostic_dependency_invalidation(0x0225E8CC,1),(false,2));
+}
 #[test]
 fn data_write_preserves_entry_and_live_bit_then_real_code_write_invalidates() {
  for thumb in [false,true] {
@@ -83,7 +98,8 @@ with tempfile.TemporaryDirectory() as tmp:
  module='\n#[path = '+repr(str(Path('src/jit/main_code_footprint.rs').resolve())).replace("'",'"')+'] mod main_code_footprint;\n'
  # Host stable lacks this nightly pointer convenience method. The fixture maps
  # every tested address; use the equivalent checked dereference for host tests.
- methods='\n'.join(method(n) for n in ['invalidate_block','invalidate_blocks']).replace('.as_mut_unchecked()', '.as_mut().unwrap()')
+ methods='\n'.join(method(n) for n in ['invalidate_block','invalidate_blocks','diagnostic_dependency_invalidation']).replace('.as_mut_unchecked()', '.as_mut().unwrap()')
+ module += '\n#[path = '+repr(str(Path('src/dependency_diag.rs').resolve())).replace("'",'"')+'] mod dependency_diag;\n'
  code=prefix+module+'impl JitMemory {\n'+methods+'\n}\nimpl Emu {\n'+method('jit_set_live_range')+'\n}\n'+tests
  p=tmp/'range_tests.rs';p.write_text(code)
  exe=tmp/'range_tests'

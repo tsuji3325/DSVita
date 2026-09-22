@@ -187,6 +187,7 @@ pub(crate) fn reset() {
     PRESERVED_MAIN_WRITES.store(0, Ordering::Relaxed);
     crate::compile_diag::reset();
     crate::write_diag::reset();
+    crate::dependency_diag::reset();
     for stat in &STATS {
         stat.store(0, Ordering::Relaxed);
     }
@@ -433,7 +434,7 @@ pub(crate) fn write_report() {
 
     let mut report = format!(
         concat!(
-            "report_version=7\n",
+            "report_version=8\n",
             "pc_source=arm9_jit_block_boundary_and_interpreter_entry pc_note=last_guest_boundary_includes_host_helpers_not_instruction_exact\n",
             "slow_threshold_us={} pc_sample_interval_ms=1 pc_bucket_size={} overlay_hint_note=last_FS_ClearOverlayImage_event_not_ownership\n",
             "cpu_frames={} cpu_avg_us={} cpu_max_us={} cpu_slow_frames={} cpu_slow_avg_us={} cpu_slow_max_us={}\n",
@@ -510,6 +511,7 @@ pub(crate) fn write_report() {
 
     crate::compile_diag::append_report(&mut report);
     crate::write_diag::append_report(&mut report);
+    crate::dependency_diag::append_report(&mut report);
     report.push_str(&format!("[jit_write_preserve]\npreserved_live_page_writes={} policy=single_page_main_RAM_disjoint_from_session_code_and_folded_data footprint_bytes=524288 stale_dependencies_retained=true\n", PRESERVED_MAIN_WRITES.load(Ordering::Relaxed)));
     #[cfg(target_os = "vita")]
     {
@@ -603,7 +605,7 @@ mod tests {
         assert!(!std::path::Path::new("frame_perf.log").exists());
         write_report();
         let report = std::fs::read_to_string("frame_perf.log").unwrap();
-        assert!(report.contains("report_version=7"));
+        assert!(report.contains("report_version=8"));
         assert!(report.contains("cpu_slow_frames=1"));
         assert!(report.contains("[top_slow_pc_buckets]"));
         assert!(report.contains("[slow_phase_samples]"));
