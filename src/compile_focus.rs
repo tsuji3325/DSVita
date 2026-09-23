@@ -56,18 +56,39 @@ pub(crate) fn compiled(pc:u32,times:[u64;4],blocks:usize,host_bytes:usize) {
         t.previous_folded=Some(t.folded.clone());
     }
 }
-// Only patch events in the cached E8CC allocation, not every RAM write.
-const PATCH_ROWS:usize=20*16*2;
-static PATCH_COUNT:[AtomicU32;PATCH_ROWS]=[const {AtomicU32::new(0)};PATCH_ROWS];
-static PATCH_FIRST:[AtomicU32;PATCH_ROWS]=[const {AtomicU32::new(0)};PATCH_ROWS];
+// Only patch events in the two cached allocations under investigation, not every RAM write.
+const ARM_PATCH_START:u32=0x0225E8CC;
+const ARM_PATCH_END:u32=0x0225E91C;
+const ARM_PATCH_ROWS:usize=20*16*2;
+static ARM_PATCH_COUNT:[AtomicU32;ARM_PATCH_ROWS]=[const {AtomicU32::new(0)};ARM_PATCH_ROWS];
+static ARM_PATCH_FIRST:[AtomicU32;ARM_PATCH_ROWS]=[const {AtomicU32::new(0)};ARM_PATCH_ROWS];
+
+const THUMB_PATCH_START:u32=0x021FAED6;
+const THUMB_PATCH_END:u32=0x021FB05E;
+const THUMB_PATCH_INSTS:usize=((THUMB_PATCH_END-THUMB_PATCH_START)/2) as usize;
+const THUMB_PATCH_ROWS:usize=THUMB_PATCH_INSTS*16*2;
+static THUMB_PATCH_COUNT:[AtomicU32;THUMB_PATCH_ROWS]=[const {AtomicU32::new(0)};THUMB_PATCH_ROWS];
+static THUMB_PATCH_FIRST:[AtomicU32;THUMB_PATCH_ROWS]=[const {AtomicU32::new(0)};THUMB_PATCH_ROWS];
+
 pub(crate) fn patched(owner:u32,pc:u32,addr:u32,write:bool) {
-    if owner!=0x0225E8CC || !(0x0225E8CC..0x0225E91C).contains(&pc) || pc&3!=0 {return;}
-    let index=((pc-0x0225E8CC) as usize/4*16+((addr>>24)&15) as usize)*2+write as usize;
-    if PATCH_COUNT[index].fetch_add(1,Relaxed)==0 {PATCH_FIRST[index].store(addr,Relaxed);}
+    if owner==ARM_PATCH_START {
+        if !(ARM_PATCH_START..ARM_PATCH_END).contains(&pc) || pc&3!=0 {return;}
+        let index=((pc-ARM_PATCH_START) as usize/4*16+((addr>>24)&15) as usize)*2+write as usize;
+        if ARM_PATCH_COUNT[index].fetch_add(1,Relaxed)==0 {ARM_PATCH_FIRST[index].store(addr,Relaxed);}
+        return;
+    }
+    if owner==THUMB_PATCH_START {
+        // JIT metadata tags Thumb guest PCs in bit0. Normalize only for reporting/indexing.
+        if pc&1==0 {return;}
+        let pc=pc&!1;
+        if !(THUMB_PATCH_START..THUMB_PATCH_END).contains(&pc) || (pc-THUMB_PATCH_START)&1!=0 {return;}
+        let index=((pc-THUMB_PATCH_START) as usize/2*16+((addr>>24)&15) as usize)*2+write as usize;
+        if THUMB_PATCH_COUNT[index].fetch_add(1,Relaxed)==0 {THUMB_PATCH_FIRST[index].store(addr,Relaxed);}
+    }
 }
 pub(crate) fn reset() {
     *state().lock().unwrap()=Default::default();
-    for v in PATCH_COUNT.iter().chain(PATCH_FIRST.iter()) {v.store(0,Relaxed);}
+    for v in ARM_PATCH_COUNT.iter().chain(ARM_PATCH_FIRST.iter()).chain(THUMB_PATCH_COUNT.iter()).chain(THUMB_PATCH_FIRST.iter()) {v.store(0,Relaxed);}
 }
 pub(crate) fn append_report(out:&mut String) {
     let s=state().lock().unwrap();
@@ -78,9 +99,12 @@ pub(crate) fn append_report(out:&mut String) {
         out.push_str(&format!("target=0x{:08X} folded_repeat_same={} folded_repeat_changed={} folded_incomplete_compiles={} last_folded_count={} last_folded_overflow={} folded_scope=values_already_read_by_ARM32_emitter_not_all_runtime_dependencies\n",TARGETS[i],t.folded_same,t.folded_changed,t.folded_incomplete,t.folded.len(),t.folded_overflow));
         for (pc,addr,value) in &t.folded {out.push_str(&format!("target=0x{:08X} last_folded_pc=0x{pc:08X} address=0x{addr:08X} value=0x{value:08X}\n",TARGETS[i]));}
     }
-    out.push_str("[jit_patch_focus]\nscope=patch_slow_mem_completed_in_current_saved_0x0225E8CC_allocation region=(address>>24)&15\n");
-    for i in 0..PATCH_ROWS {let count=PATCH_COUNT[i].load(Relaxed);if count==0 {continue;}
-        out.push_str(&format!("guest_pc=0x{:08X} region=0x{:X} write={} patches={} first_address=0x{:08X}\n",0x0225E8CC+(i/32*4) as u32,(i/2)%16,i%2,count,PATCH_FIRST[i].load(Relaxed)));
+    out.push_str("[jit_patch_focus]\nscope=patch_slow_mem_completed_in_current_saved_E8CC_or_FAED6_allocation region=(address>>24)&15 thumb_pc_normalized=true\n");
+    for i in 0..ARM_PATCH_ROWS {let count=ARM_PATCH_COUNT[i].load(Relaxed);if count==0 {continue;}
+        out.push_str(&format!("owner=0x{ARM_PATCH_START:08X} guest_pc=0x{:08X} region=0x{:X} write={} patches={} first_address=0x{:08X}\n",ARM_PATCH_START+(i/32*4) as u32,(i/2)%16,i%2,count,ARM_PATCH_FIRST[i].load(Relaxed)));
+    }
+    for i in 0..THUMB_PATCH_ROWS {let count=THUMB_PATCH_COUNT[i].load(Relaxed);if count==0 {continue;}
+        out.push_str(&format!("owner=0x{THUMB_PATCH_START:08X} guest_pc=0x{:08X} region=0x{:X} write={} patches={} first_address=0x{:08X}\n",THUMB_PATCH_START+(i/32*2) as u32,(i/2)%16,i%2,count,THUMB_PATCH_FIRST[i].load(Relaxed)));
     }
 }
 #[cfg(test)]
@@ -100,11 +124,13 @@ mod tests {
     fn bounded_immediates_patch_scope_report_and_reset() {
         reset();assert!(watched(TARGETS[0],true));assert!(!watched(TARGETS[0],false));
         observe(&[(1,1)],&vec![(TARGETS[0],0x02001000);70]);
-        patched(0,0x0225E8CC,0x02000000,true);patched(0x0225E8CC,0x0225E91C,0x02000000,true);
-        patched(0x0225E8CC,0x0225E8CC,0x04000100,false);patched(0x0225E8CC,0x0225E8CC,0x04000200,false);
+        patched(0,0x0225E8CC,0x02000000,true);patched(ARM_PATCH_START,ARM_PATCH_END,0x02000000,true);
+        patched(ARM_PATCH_START,ARM_PATCH_START,0x04000100,false);patched(ARM_PATCH_START,ARM_PATCH_START,0x04000200,false);
+        patched(THUMB_PATCH_START,THUMB_PATCH_START|1,0x04000130,false);patched(THUMB_PATCH_START,THUMB_PATCH_START|1,0x04000134,false);
         let mut out=String::new();append_report(&mut out);
         assert!(out.contains("last_immediate_operands=70 reported_immediates=64"));
-        assert!(out.contains("guest_pc=0x0225E8CC region=0x4 write=0 patches=2 first_address=0x04000100"));
+        assert!(out.contains("owner=0x0225E8CC guest_pc=0x0225E8CC region=0x4 write=0 patches=2 first_address=0x04000100"));
+        assert!(out.contains("owner=0x021FAED6 guest_pc=0x021FAED6 region=0x4 write=0 patches=2 first_address=0x04000130"));
         assert!(!out.contains("write=1 patches="));
         reset();let mut out=String::new();append_report(&mut out);assert!(!out.contains("first_address="));
     }
