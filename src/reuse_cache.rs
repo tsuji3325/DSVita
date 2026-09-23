@@ -1,9 +1,9 @@
-//! Ten-entry same-allocation ARM9 cache. No locks or guest calls while borrowed.
+//! Twelve-entry same-allocation ARM9 cache. No locks or guest calls while borrowed.
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 pub(crate) const ARM_TARGETS: [u32; 4] = [0x0225E8CC, 0x0225E9A4, 0x0225E9B4, 0x0225E9D8];
-pub(crate) const THUMB_TARGETS: [u32; 6] = [0x021FAED6, 0x021FA25A, 0x02203714, 0x021F2E34, 0x021F6AF4, 0x021F7234];
-const TARGETS: [(u32, bool); 10] = [
+pub(crate) const THUMB_TARGETS: [u32; 8] = [0x021FAED6, 0x021FA25A, 0x02203714, 0x021F2E34, 0x021F6AF4, 0x021F7234, 0x021F81A0, 0x021F994C];
+const TARGETS: [(u32, bool); 12] = [
     (ARM_TARGETS[0], false),
     (ARM_TARGETS[1], false),
     (ARM_TARGETS[2], false),
@@ -14,9 +14,11 @@ const TARGETS: [(u32, bool); 10] = [
     (THUMB_TARGETS[3], true),
     (THUMB_TARGETS[4], true),
     (THUMB_TARGETS[5], true),
+    (THUMB_TARGETS[6], true),
+    (THUMB_TARGETS[7], true),
 ];
 
-static HITS: [AtomicU32; 10] = [const { AtomicU32::new(0) }; 10];
+static HITS: [AtomicU32; 12] = [const { AtomicU32::new(0) }; 12];
 static STORES: AtomicU32 = AtomicU32::new(0);
 static MISSES: AtomicU32 = AtomicU32::new(0);
 static CHANGED: AtomicU32 = AtomicU32::new(0);
@@ -43,7 +45,7 @@ struct Entry {
 
 #[derive(Default)]
 pub(crate) struct Cache {
-    entries: [Option<Entry>; 10],
+    entries: [Option<Entry>; 12],
 }
 
 fn target_index(pc: u32, thumb: bool) -> Option<usize> {
@@ -142,7 +144,7 @@ pub(crate) fn reset() {
 }
 
 pub(crate) fn append_report(out: &mut String) {
-    out.push_str("[jit_reuse]\npolicy=ARM9_four_ARM_targets_without_immediate_memory_operands_plus_six_Thumb_targets_with_main_RAM_folded_literals_revalidated same_native_allocation known_FAED6_and_E8CC_MMIO_patch_windows_accepted_in_place all_other_native_changes_rejected clear_on_any_eviction write_snapshots_disabled\n");
+    out.push_str("[jit_reuse]\npolicy=ARM9_four_ARM_targets_without_immediate_memory_operands_plus_eight_Thumb_targets_with_main_RAM_folded_literals_revalidated same_native_allocation known_FAED6_and_E8CC_MMIO_patch_windows_accepted_in_place all_other_native_changes_rejected clear_on_any_eviction write_snapshots_disabled\n");
     out.push_str(&format!(
         "stores={} misses={} key_mismatch={} native_modified={} accepted_native_patches={} excluded={} cache_clears={}\n",
         STORES.load(Relaxed), MISSES.load(Relaxed), CHANGED.load(Relaxed),
