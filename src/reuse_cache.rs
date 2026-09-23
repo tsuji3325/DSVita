@@ -1,18 +1,20 @@
-//! Six-entry same-allocation ARM9 cache. No locks or guest calls while borrowed.
+//! Eight-entry same-allocation ARM9 cache. No locks or guest calls while borrowed.
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 pub(crate) const ARM_TARGETS: [u32; 4] = [0x0225E8CC, 0x0225E9A4, 0x0225E9B4, 0x0225E9D8];
-pub(crate) const THUMB_TARGETS: [u32; 2] = [0x021FAED6, 0x021FA25A];
-const TARGETS: [(u32, bool); 6] = [
+pub(crate) const THUMB_TARGETS: [u32; 4] = [0x021FAED6, 0x021FA25A, 0x02203714, 0x021F2E34];
+const TARGETS: [(u32, bool); 8] = [
     (ARM_TARGETS[0], false),
     (ARM_TARGETS[1], false),
     (ARM_TARGETS[2], false),
     (ARM_TARGETS[3], false),
     (THUMB_TARGETS[0], true),
     (THUMB_TARGETS[1], true),
+    (THUMB_TARGETS[2], true),
+    (THUMB_TARGETS[3], true),
 ];
 
-static HITS: [AtomicU32; 6] = [const { AtomicU32::new(0) }; 6];
+static HITS: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
 static STORES: AtomicU32 = AtomicU32::new(0);
 static MISSES: AtomicU32 = AtomicU32::new(0);
 static CHANGED: AtomicU32 = AtomicU32::new(0);
@@ -39,7 +41,7 @@ struct Entry {
 
 #[derive(Default)]
 pub(crate) struct Cache {
-    entries: [Option<Entry>; 6],
+    entries: [Option<Entry>; 8],
 }
 
 fn target_index(pc: u32, thumb: bool) -> Option<usize> {
@@ -99,7 +101,7 @@ impl Cache {
         patch_offset: usize,
         patched: &[u8],
     ) -> bool {
-        let thumb = owner == THUMB_TARGETS[0];
+        let thumb = THUMB_TARGETS.contains(&owner);
         let guest_pc_norm = if thumb { guest_pc & !1 } else { guest_pc };
         let known = if thumb {
             addr == 0x04000060
@@ -138,7 +140,7 @@ pub(crate) fn reset() {
 }
 
 pub(crate) fn append_report(out: &mut String) {
-    out.push_str("[jit_reuse]\npolicy=ARM9_four_ARM_targets_without_immediate_memory_operands_plus_two_Thumb_targets_with_main_RAM_folded_literals_revalidated same_native_allocation known_FAED6_and_E8CC_MMIO_patch_windows_accepted_in_place all_other_native_changes_rejected clear_on_any_eviction write_snapshots_disabled\n");
+    out.push_str("[jit_reuse]\npolicy=ARM9_four_ARM_targets_without_immediate_memory_operands_plus_four_Thumb_targets_with_main_RAM_folded_literals_revalidated same_native_allocation known_FAED6_and_E8CC_MMIO_patch_windows_accepted_in_place all_other_native_changes_rejected clear_on_any_eviction write_snapshots_disabled\n");
     out.push_str(&format!(
         "stores={} misses={} key_mismatch={} native_modified={} accepted_native_patches={} excluded={} cache_clears={}\n",
         STORES.load(Relaxed), MISSES.load(Relaxed), CHANGED.load(Relaxed),
@@ -199,6 +201,27 @@ mod tests {
         assert_eq!(c.lookup(&changed,&m),None);
         let mut wrong_mode=thumb_key(); wrong_mode.thumb=false;
         assert_eq!(c.lookup(&wrong_mode,&m),None);
+    }
+
+    #[test]
+    fn all_thumb_targets_have_distinct_slots_and_dependency_identity() {
+        let mut c=Cache::default(); let m=vec![5;256];
+        for (slot, pc) in THUMB_TARGETS.iter().copied().enumerate() {
+            let mut key=thumb_key();
+            key.pc=pc; key.end=pc+4;
+            key.dependencies=if pc==0x021F2E34 { vec![(pc+4,0x021F2EF4,0x02205E54),(pc+0x76,0x021F2EF8,0x00000F33)] } else { Vec::new() };
+            c.remember(key,slot*24,16,&m);
+        }
+        for (slot, pc) in THUMB_TARGETS.iter().copied().enumerate() {
+            let mut key=thumb_key();
+            key.pc=pc; key.end=pc+4;
+            key.dependencies=if pc==0x021F2E34 { vec![(pc+4,0x021F2EF4,0x02205E54),(pc+0x76,0x021F2EF8,0x00000F33)] } else { Vec::new() };
+            assert_eq!(c.lookup(&key,&m),Some(slot*24));
+        }
+        let mut changed=thumb_key();
+        changed.pc=0x021F2E34; changed.end=0x021F2E38;
+        changed.dependencies=vec![(0x021F2E38,0x021F2EF4,0x02205E55),(0x021F2EAA,0x021F2EF8,0x00000F33)];
+        assert_eq!(c.lookup(&changed,&m),None);
     }
 
     #[test]
