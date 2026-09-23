@@ -1417,6 +1417,7 @@ impl JitMemory {
         let patch_write = metadata.s.fast.op.is_write_mem_transfer();
 
         let fast_mem_start = (*host_pc - metadata.s.fast.start_offset as usize) as *mut u8;
+        let patch_offset = fast_mem_start as usize - self.mem.as_ptr() as usize;
         let fast_mem = slice::from_raw_parts_mut(fast_mem_start, metadata.s.fast.size as usize);
 
         debug_println!("{cpu:?} slow mem patch at {:x} {:?} addr {guest_memory_addr:x}", metadata.pc, metadata.s.fast.op);
@@ -1427,6 +1428,17 @@ impl JitMemory {
         } else {
             Self::execute_patch_slow_mem::<false>(host_pc, guest_memory_addr, fast_mem, metadata, cpu);
         }
+        // Only the two hardware-confirmed FAED6 MMIO patch windows may advance
+        // the saved native snapshot, and only in this same allocation. No allocation,
+        // file I/O or global write tracing is added to the fault path.
+        self.reuse_cache.accept_known_patch(
+            patch_owner,
+            patch_pc,
+            guest_memory_addr,
+            patch_write,
+            patch_offset,
+            fast_mem,
+        );
         crate::compile_focus::patched(patch_owner, patch_pc, guest_memory_addr, patch_write);
         true
     }
