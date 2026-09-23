@@ -17,6 +17,7 @@ static STORES: AtomicU32 = AtomicU32::new(0);
 static MISSES: AtomicU32 = AtomicU32::new(0);
 static CHANGED: AtomicU32 = AtomicU32::new(0);
 static PATCHED: AtomicU32 = AtomicU32::new(0);
+static ACCEPTED_PATCHES: AtomicU32 = AtomicU32::new(0);
 static EXCLUDED: AtomicU32 = AtomicU32::new(0);
 static CLEARS: AtomicU32 = AtomicU32::new(0);
 
@@ -84,22 +85,55 @@ impl Cache {
         self.entries[i] = Some(Entry { key, offset, native: native.to_vec() });
         STORES.fetch_add(1, Relaxed);
     }
+
+    /// Accept only the two FAED6 MMIO slow-path windows observed on hardware.
+    /// The cache remains tied to the same allocation/metadata. Updating only the
+    /// exact rewritten window means any unrelated native modification still fails
+    /// the full-byte identity check on the next lookup.
+    pub fn accept_known_patch(
+        &mut self,
+        owner: u32,
+        guest_pc: u32,
+        addr: u32,
+        write: bool,
+        patch_offset: usize,
+        patched: &[u8],
+    ) -> bool {
+        if owner != THUMB_TARGETS[0] || addr != 0x04000060 {
+            return false;
+        }
+        let guest_pc = guest_pc & !1;
+        let known = (guest_pc == 0x021FAFFE && !write) || (guest_pc == 0x021FB006 && write);
+        if !known {
+            return false;
+        }
+        let Some(i) = target_index(owner, true) else { return false; };
+        let Some(entry) = &mut self.entries[i] else { return false; };
+        if entry.key.pc != owner || !entry.key.thumb || patch_offset < entry.offset {
+            return false;
+        }
+        let rel = patch_offset - entry.offset;
+        let Some(dst) = entry.native.get_mut(rel..rel + patched.len()) else { return false; };
+        dst.copy_from_slice(patched);
+        ACCEPTED_PATCHES.fetch_add(1, Relaxed);
+        true
+    }
 }
 
 pub(crate) fn excluded() { EXCLUDED.fetch_add(1, Relaxed); }
 
 pub(crate) fn reset() {
-    for v in HITS.iter().chain([&STORES, &MISSES, &CHANGED, &PATCHED, &EXCLUDED, &CLEARS]) {
+    for v in HITS.iter().chain([&STORES, &MISSES, &CHANGED, &PATCHED, &ACCEPTED_PATCHES, &EXCLUDED, &CLEARS]) {
         v.store(0, Relaxed);
     }
 }
 
 pub(crate) fn append_report(out: &mut String) {
-    out.push_str("[jit_reuse]\npolicy=ARM9_four_ARM_targets_without_immediate_memory_operands_plus_two_Thumb_targets_with_main_RAM_folded_literals_revalidated fresh_decode_and_HLE_checks same_native_allocation unpatched_only clear_on_any_eviction write_snapshots_disabled\n");
+    out.push_str("[jit_reuse]\npolicy=ARM9_four_ARM_targets_without_immediate_memory_operands_plus_two_Thumb_targets_with_main_RAM_folded_literals_revalidated same_native_allocation known_FAED6_MMIO_patch_windows_accepted_in_place all_other_native_changes_rejected clear_on_any_eviction write_snapshots_disabled\n");
     out.push_str(&format!(
-        "stores={} misses={} key_mismatch={} native_modified={} excluded={} cache_clears={}\n",
+        "stores={} misses={} key_mismatch={} native_modified={} accepted_native_patches={} excluded={} cache_clears={}\n",
         STORES.load(Relaxed), MISSES.load(Relaxed), CHANGED.load(Relaxed),
-        PATCHED.load(Relaxed), EXCLUDED.load(Relaxed), CLEARS.load(Relaxed)
+        PATCHED.load(Relaxed), ACCEPTED_PATCHES.load(Relaxed), EXCLUDED.load(Relaxed), CLEARS.load(Relaxed)
     ));
     for (i, (pc, thumb)) in TARGETS.iter().enumerate() {
         out.push_str(&format!("pc=0x{pc:08X} thumb={} reuse_hits={}\n", *thumb as u8, HITS[i].load(Relaxed)));
@@ -156,6 +190,22 @@ mod tests {
         assert_eq!(c.lookup(&changed,&m),None);
         let mut wrong_mode=thumb_key(); wrong_mode.thumb=false;
         assert_eq!(c.lookup(&wrong_mode,&m),None);
+    }
+
+    #[test]
+    fn known_faed6_patch_window_can_advance_snapshot_but_other_changes_still_fail() {
+        let mut c=Cache::default(); let mut m=vec![9;128];
+        c.remember(thumb_key(),32,64,&m);
+        m[40..44].copy_from_slice(&[1,2,3,4]);
+        assert!(c.accept_known_patch(THUMB_TARGETS[0],0x021FAFFE|1,0x04000060,false,40,&m[40..44]));
+        assert_eq!(c.lookup(&thumb_key(),&m),Some(32));
+
+        m[52]=8;
+        assert_eq!(c.lookup(&thumb_key(),&m),None);
+        m[52]=9;
+        assert!(!c.accept_known_patch(THUMB_TARGETS[0],0x021FAFFE|1,0x04000064,false,40,&m[40..44]));
+        assert_eq!(c.lookup(&thumb_key(),&m),Some(32));
+        assert!(!c.accept_known_patch(THUMB_TARGETS[0],0x021FB006|1,0x04000060,false,40,&m[40..44]));
     }
 
     #[test]
