@@ -1,9 +1,9 @@
-//! Twelve-entry same-allocation ARM9 cache. No locks or guest calls while borrowed.
+//! Fourteen-entry same-allocation ARM9 cache. No locks or guest calls while borrowed.
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 pub(crate) const ARM_TARGETS: [u32; 4] = [0x0225E8CC, 0x0225E9A4, 0x0225E9B4, 0x0225E9D8];
-pub(crate) const THUMB_TARGETS: [u32; 8] = [0x021FAED6, 0x021FA25A, 0x02203714, 0x021F2E34, 0x021F6AF4, 0x021F7234, 0x021F81A0, 0x021F994C];
-const TARGETS: [(u32, bool); 12] = [
+pub(crate) const THUMB_TARGETS: [u32; 10] = [0x021FAED6, 0x021FA25A, 0x02203714, 0x021F2E34, 0x021F6AF4, 0x021F7234, 0x021F81A0, 0x021F994C, 0x021FC8FC, 0x022048A4];
+const TARGETS: [(u32, bool); 14] = [
     (ARM_TARGETS[0], false),
     (ARM_TARGETS[1], false),
     (ARM_TARGETS[2], false),
@@ -16,9 +16,11 @@ const TARGETS: [(u32, bool); 12] = [
     (THUMB_TARGETS[5], true),
     (THUMB_TARGETS[6], true),
     (THUMB_TARGETS[7], true),
+    (THUMB_TARGETS[8], true),
+    (THUMB_TARGETS[9], true),
 ];
 
-static HITS: [AtomicU32; 12] = [const { AtomicU32::new(0) }; 12];
+static HITS: [AtomicU32; 14] = [const { AtomicU32::new(0) }; 14];
 static STORES: AtomicU32 = AtomicU32::new(0);
 static MISSES: AtomicU32 = AtomicU32::new(0);
 static CHANGED: AtomicU32 = AtomicU32::new(0);
@@ -45,7 +47,7 @@ struct Entry {
 
 #[derive(Default)]
 pub(crate) struct Cache {
-    entries: [Option<Entry>; 12],
+    entries: [Option<Entry>; 14],
 }
 
 fn target_index(pc: u32, thumb: bool) -> Option<usize> {
@@ -144,7 +146,7 @@ pub(crate) fn reset() {
 }
 
 pub(crate) fn append_report(out: &mut String) {
-    out.push_str("[jit_reuse]\npolicy=ARM9_four_ARM_targets_without_immediate_memory_operands_plus_eight_Thumb_targets_with_main_RAM_folded_literals_revalidated same_native_allocation known_FAED6_and_E8CC_MMIO_patch_windows_accepted_in_place all_other_native_changes_rejected clear_on_any_eviction write_snapshots_disabled\n");
+    out.push_str("[jit_reuse]\npolicy=ARM9_four_ARM_targets_without_immediate_memory_operands_plus_ten_Thumb_targets_with_main_RAM_folded_literals_revalidated same_native_allocation known_FAED6_and_E8CC_MMIO_patch_windows_accepted_in_place all_other_native_changes_rejected clear_on_any_eviction write_snapshots_disabled\n");
     out.push_str(&format!(
         "stores={} misses={} key_mismatch={} native_modified={} accepted_native_patches={} excluded={} cache_clears={}\n",
         STORES.load(Relaxed), MISSES.load(Relaxed), CHANGED.load(Relaxed),
@@ -217,6 +219,8 @@ mod tests {
                 0x021F2E34 => vec![(0x021F2E38,0x021F2EF4,0x02205E54),(0x021F2EAA,0x021F2EF8,0x00000F33)],
                 0x021F6AF4 => vec![(0x021F6B2A,0x021F6B68,0x02207E74)],
                 0x021F7234 => vec![(0x021F726A,0x021F72A8,0x02207EE8)],
+                0x021FC8FC => vec![(0x021FC906,0x021FC98C,0x02208268),(0x021FC912,0x021FC990,0x022082EC)],
+                0x022048A4 => vec![(0x022048A8,0x022048FC,0x02208B04)],
                 _ => Vec::new(),
             };
             c.remember(key,slot*24,16,&m);
@@ -228,6 +232,8 @@ mod tests {
                 0x021F2E34 => vec![(0x021F2E38,0x021F2EF4,0x02205E54),(0x021F2EAA,0x021F2EF8,0x00000F33)],
                 0x021F6AF4 => vec![(0x021F6B2A,0x021F6B68,0x02207E74)],
                 0x021F7234 => vec![(0x021F726A,0x021F72A8,0x02207EE8)],
+                0x021FC8FC => vec![(0x021FC906,0x021FC98C,0x02208268),(0x021FC912,0x021FC990,0x022082EC)],
+                0x022048A4 => vec![(0x022048A8,0x022048FC,0x02208B04)],
                 _ => Vec::new(),
             };
             assert_eq!(c.lookup(&key,&m),Some(slot*24));
@@ -245,6 +251,16 @@ mod tests {
         let mut changed=thumb_key();
         changed.pc=0x021F7234; changed.end=0x021F7238;
         changed.dependencies=vec![(0x021F726A,0x021F72A8,0x02207EE9)];
+        assert_eq!(c.lookup(&changed,&m),None);
+
+        let mut changed=thumb_key();
+        changed.pc=0x021FC8FC; changed.end=0x021FC900;
+        changed.dependencies=vec![(0x021FC906,0x021FC98C,0x02208269),(0x021FC912,0x021FC990,0x022082EC)];
+        assert_eq!(c.lookup(&changed,&m),None);
+
+        let mut changed=thumb_key();
+        changed.pc=0x022048A4; changed.end=0x022048A8;
+        changed.dependencies=vec![(0x022048A8,0x022048FC,0x02208B05)];
         assert_eq!(c.lookup(&changed,&m),None);
     }
 
