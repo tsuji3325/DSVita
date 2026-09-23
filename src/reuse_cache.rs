@@ -1,7 +1,18 @@
-//! Four-entry, same-allocation ARM9 cache. No locks or guest calls while borrowed.
+//! Six-entry same-allocation ARM9 cache. No locks or guest calls while borrowed.
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
-pub(crate) const TARGETS: [u32; 4] = [0x0225E8CC, 0x0225E9A4, 0x0225E9B4, 0x0225E9D8];
-static HITS: [AtomicU32; 4] = [const { AtomicU32::new(0) }; 4];
+
+pub(crate) const ARM_TARGETS: [u32; 4] = [0x0225E8CC, 0x0225E9A4, 0x0225E9B4, 0x0225E9D8];
+pub(crate) const THUMB_TARGETS: [u32; 2] = [0x021FAED6, 0x021FA25A];
+const TARGETS: [(u32, bool); 6] = [
+    (ARM_TARGETS[0], false),
+    (ARM_TARGETS[1], false),
+    (ARM_TARGETS[2], false),
+    (ARM_TARGETS[3], false),
+    (THUMB_TARGETS[0], true),
+    (THUMB_TARGETS[1], true),
+];
+
+static HITS: [AtomicU32; 6] = [const { AtomicU32::new(0) }; 6];
 static STORES: AtomicU32 = AtomicU32::new(0);
 static MISSES: AtomicU32 = AtomicU32::new(0);
 static CHANGED: AtomicU32 = AtomicU32::new(0);
@@ -13,90 +24,153 @@ static CLEARS: AtomicU32 = AtomicU32::new(0);
 pub(crate) struct Key {
     pub pc: u32,
     pub end: u32,
-    pub context: [u32; 2], // ARM7 mode and discovered overlay hook address
-    pub instructions: Vec<(u32, u16)>, // freshly decoded opcode and cumulative cycles
+    pub thumb: bool,
+    pub context: [u32; 2],
+    pub instructions: Vec<(u32, u16)>,
+    pub dependencies: Vec<(u32, u32, u32)>,
 }
-struct Entry { key: Key, offset: usize, native: Vec<u8> }
+
+struct Entry {
+    key: Key,
+    offset: usize,
+    native: Vec<u8>,
+}
+
 #[derive(Default)]
-pub(crate) struct Cache { entries: [Option<Entry>; 4] }
+pub(crate) struct Cache {
+    entries: [Option<Entry>; 6],
+}
+
+fn target_index(pc: u32, thumb: bool) -> Option<usize> {
+    TARGETS.iter().position(|&(target_pc, target_thumb)| target_pc == pc && target_thumb == thumb)
+}
+
 impl Cache {
     pub fn clear(&mut self) {
         self.entries = Default::default();
         CLEARS.fetch_add(1, Relaxed);
     }
-    /// Observer only: used by the fault handler before touching patch metadata.
+
     pub fn native_owner(&self, offset: usize) -> Option<u32> {
-        self.entries.iter().flatten().find(|e| offset >= e.offset && offset - e.offset < e.native.len()).map(|e| e.key.pc)
+        self.entries
+            .iter()
+            .flatten()
+            .find(|e| offset >= e.offset && offset - e.offset < e.native.len())
+            .map(|e| e.key.pc)
     }
+
     pub fn lookup(&self, key: &Key, memory: &[u8]) -> Option<usize> {
-        let i = TARGETS.iter().position(|p| *p == key.pc)?;
-        let Some(e) = &self.entries[i] else { MISSES.fetch_add(1, Relaxed); return None; };
-        if e.key != *key { CHANGED.fetch_add(1, Relaxed); return None; }
-        // Fault handlers can specialize native code. Never resurrect such a block.
+        let i = target_index(key.pc, key.thumb)?;
+        let Some(e) = &self.entries[i] else {
+            MISSES.fetch_add(1, Relaxed);
+            return None;
+        };
+        if e.key != *key {
+            CHANGED.fetch_add(1, Relaxed);
+            return None;
+        }
         if memory.get(e.offset..e.offset + e.native.len()) != Some(e.native.as_slice()) {
-            PATCHED.fetch_add(1, Relaxed); return None;
+            PATCHED.fetch_add(1, Relaxed);
+            return None;
         }
         HITS[i].fetch_add(1, Relaxed);
         Some(e.offset)
     }
+
     pub fn remember(&mut self, key: Key, offset: usize, size: usize, memory: &[u8]) {
-        let Some(i) = TARGETS.iter().position(|p| *p == key.pc) else { return; };
+        let Some(i) = target_index(key.pc, key.thumb) else { return; };
         if size == 0 || size > 16384 { return; }
         let Some(native) = memory.get(offset..offset + size) else { return; };
         self.entries[i] = Some(Entry { key, offset, native: native.to_vec() });
         STORES.fetch_add(1, Relaxed);
     }
 }
+
 pub(crate) fn excluded() { EXCLUDED.fetch_add(1, Relaxed); }
+
 pub(crate) fn reset() {
-    for v in HITS.iter().chain([&STORES, &MISSES, &CHANGED, &PATCHED, &EXCLUDED, &CLEARS]) { v.store(0, Relaxed); }
+    for v in HITS.iter().chain([&STORES, &MISSES, &CHANGED, &PATCHED, &EXCLUDED, &CLEARS]) {
+        v.store(0, Relaxed);
+    }
 }
+
 pub(crate) fn append_report(out: &mut String) {
-    out.push_str("[jit_reuse]\npolicy=ARM9_ARM_four_targets_no_immediate_memory_operands fresh_decode_and_HLE_checks same_native_allocation unpatched_only clear_on_any_eviction write_snapshots_disabled\n");
-    out.push_str(&format!("stores={} misses={} key_mismatch={} native_modified={} excluded={} cache_clears={}\n", STORES.load(Relaxed), MISSES.load(Relaxed), CHANGED.load(Relaxed), PATCHED.load(Relaxed), EXCLUDED.load(Relaxed), CLEARS.load(Relaxed)));
-    for (i, pc) in TARGETS.iter().enumerate() { out.push_str(&format!("pc=0x{pc:08X} reuse_hits={}\n", HITS[i].load(Relaxed))); }
+    out.push_str("[jit_reuse]\npolicy=ARM9_four_ARM_targets_without_immediate_memory_operands_plus_two_Thumb_targets_with_main_RAM_folded_literals_revalidated fresh_decode_and_HLE_checks same_native_allocation unpatched_only clear_on_any_eviction write_snapshots_disabled\n");
+    out.push_str(&format!(
+        "stores={} misses={} key_mismatch={} native_modified={} excluded={} cache_clears={}\n",
+        STORES.load(Relaxed), MISSES.load(Relaxed), CHANGED.load(Relaxed),
+        PATCHED.load(Relaxed), EXCLUDED.load(Relaxed), CLEARS.load(Relaxed)
+    ));
+    for (i, (pc, thumb)) in TARGETS.iter().enumerate() {
+        out.push_str(&format!("pc=0x{pc:08X} thumb={} reuse_hits={}\n", *thumb as u8, HITS[i].load(Relaxed)));
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn key() -> Key { Key { pc: TARGETS[0], end: TARGETS[0]+4, context: [0, 123], instructions: vec![(0xE1A00000, 1)] } }
+
+    fn arm_key() -> Key {
+        Key {
+            pc: ARM_TARGETS[0], end: ARM_TARGETS[0] + 4, thumb: false,
+            context: [0, 123], instructions: vec![(0xE1A00000, 1)], dependencies: Vec::new(),
+        }
+    }
+
+    fn thumb_key() -> Key {
+        Key {
+            pc: THUMB_TARGETS[0], end: THUMB_TARGETS[0] + 4, thumb: true,
+            context: [0, 123], instructions: vec![(0x4800, 1), (0x4770, 2)],
+            dependencies: vec![(THUMB_TARGETS[0], 0x021FB080, 0x000008AC)],
+        }
+    }
+
     #[test]
     fn exact_identity_and_restoration() {
         let mut c=Cache::default(); let m=vec![7;128];
-        c.remember(key(),16,32,&m);
-        assert_eq!(c.lookup(&key(),&m),Some(16));
-        assert_eq!(c.native_owner(16),Some(TARGETS[0]));
-        assert_eq!(c.native_owner(47),Some(TARGETS[0]));
-        assert_eq!(c.native_owner(15),None);assert_eq!(c.native_owner(48),None);
-        let mut changed=key(); changed.instructions[0].0 ^= 1;
+        c.remember(arm_key(),16,32,&m);
+        assert_eq!(c.lookup(&arm_key(),&m),Some(16));
+        assert_eq!(c.native_owner(16),Some(ARM_TARGETS[0]));
+        assert_eq!(c.native_owner(47),Some(ARM_TARGETS[0]));
+        assert_eq!(c.native_owner(15),None); assert_eq!(c.native_owner(48),None);
+
+        let mut changed=arm_key(); changed.instructions[0].0^=1;
         assert_eq!(c.lookup(&changed,&m),None);
-        assert_eq!(c.lookup(&key(),&m),Some(16));
-        assert_eq!(c.native_owner(16),Some(TARGETS[0]));
-        assert_eq!(c.native_owner(47),Some(TARGETS[0]));
-        assert_eq!(c.native_owner(15),None);assert_eq!(c.native_owner(48),None);
-        let mut changed=key(); changed.instructions[0].1=2;
+        assert_eq!(c.lookup(&arm_key(),&m),Some(16));
+        let mut changed=arm_key(); changed.instructions[0].1=2;
         assert_eq!(c.lookup(&changed,&m),None);
-        let mut changed=key(); changed.end+=4;
+        let mut changed=arm_key(); changed.end+=4;
         assert_eq!(c.lookup(&changed,&m),None);
-        let mut changed=key(); changed.context[0]=1;
+        let mut changed=arm_key(); changed.context[0]=1;
         assert_eq!(c.lookup(&changed,&m),None);
-        let mut changed=key(); changed.context[1]=456;
+        let mut changed=arm_key(); changed.context[1]=456;
         assert_eq!(c.lookup(&changed,&m),None);
     }
+
+    #[test]
+    fn thumb_literal_values_are_part_of_identity() {
+        let mut c=Cache::default(); let m=vec![9;128];
+        c.remember(thumb_key(),32,24,&m);
+        assert_eq!(c.lookup(&thumb_key(),&m),Some(32));
+        let mut changed=thumb_key(); changed.dependencies[0].2^=1;
+        assert_eq!(c.lookup(&changed,&m),None);
+        let mut wrong_mode=thumb_key(); wrong_mode.thumb=false;
+        assert_eq!(c.lookup(&wrong_mode,&m),None);
+    }
+
     #[test]
     fn patch_eviction_reset_and_bounds_reject_stale_native_code() {
         let mut c=Cache::default(); let mut m=vec![7;128];
-        c.remember(key(),16,32,&m); m[20]=8;
-        assert_eq!(c.lookup(&key(),&m),None);
+        c.remember(arm_key(),16,32,&m); m[20]=8;
+        assert_eq!(c.lookup(&arm_key(),&m),None);
         m[20]=7; c.clear();
         assert_eq!(c.native_owner(16),None);
-        assert_eq!(c.lookup(&key(),&m),None);
-        c.remember(key(),120,32,&m);
-        assert_eq!(c.lookup(&key(),&m),None);
-        c.remember(key(),16,32,&m);
-        assert_eq!(c.lookup(&key(),&m[..24]),None);
-        let mut other=key(); other.pc+=1;
+        assert_eq!(c.lookup(&arm_key(),&m),None);
+        c.remember(arm_key(),120,32,&m);
+        assert_eq!(c.lookup(&arm_key(),&m),None);
+        c.remember(arm_key(),16,32,&m);
+        assert_eq!(c.lookup(&arm_key(),&m[..24]),None);
+        let mut other=arm_key(); other.pc+=1;
         assert_eq!(c.lookup(&other,&m),None);
     }
 }

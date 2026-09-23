@@ -717,24 +717,34 @@ fn emit_code_block_internal(asm: &mut JitAsm, guest_pc: u32, thumb: bool) {
     debug_println!("{:?} {thumb} emit code block {guest_pc:x} - {guest_pc_end:x}", asm.cpu);
 
     // Keep fresh decoding, threshold handling and SDK substitutions above this gate.
-    // Exclude all PC-relative memory operands: their emitted constants/mappings
-    // can depend on data outside the decoded code. No such dependencies are reused.
+    // ARM candidates still reject every PC-relative memory operand. The two Thumb
+    // candidates are checked after analysis so their folded main-RAM literals can
+    // be included in the cache identity without changing the ARM fast path.
     #[cfg(target_arch = "arm")]
-    let reuse_key = if asm.cpu == ARM9 && !thumb && crate::reuse_cache::TARGETS.contains(&guest_pc) {
+    let mut reuse_key = if asm.cpu == ARM9 && !thumb && crate::reuse_cache::ARM_TARGETS.contains(&guest_pc) {
         if !is_os_irq_handler && asm.emu.fs_clear_overlay_image_addr != 0
             && asm.emu.fs_clear_overlay_image_addr != guest_pc
             && asm.jit_buf.insts.iter().enumerate().all(|(i, inst)| inst.imm_transfer_addr(guest_pc + i as u32 * 4).is_none()) {
             Some(crate::reuse_cache::Key {
-                pc: guest_pc, end: guest_pc_end + 4,
+                pc: guest_pc,
+                end: guest_pc_end + 4,
+                thumb: false,
                 context: [asm.emu.settings.arm7_emu() as u32, asm.emu.fs_clear_overlay_image_addr],
                 instructions: asm.jit_buf.insts.iter().zip(&asm.jit_buf.insts_cycle_counts).map(|(i, c)| (i.opcode, *c)).collect(),
+                dependencies: Vec::new(),
             })
-        } else { crate::reuse_cache::excluded(); None }
-    } else { None };
+        } else {
+            crate::reuse_cache::excluded();
+            None
+        }
+    } else {
+        None
+    };
+
     #[cfg(target_arch = "arm")]
     if let Some(key) = &reuse_key {
         if let Some(offset) = asm.emu.jit.reuse_cache.lookup(key, &asm.emu.jit.mem) {
-            let entry = asm.emu.jit_restore_reuse(guest_pc, guest_pc_end + 4, offset);
+            let entry = asm.emu.jit_restore_reuse(guest_pc, guest_pc_end + 4, offset, false);
             // No owned key or cache borrow may survive execution (guest longjmp).
             drop(reuse_key);
             asm.runtime_data.pre_cycle_count_sum = 0;
@@ -747,6 +757,72 @@ fn emit_code_block_internal(asm: &mut JitAsm, guest_pc: u32, thumb: bool) {
 
     let analyze_start = crate::compile_diag::clock(asm.cpu == ARM9);
     asm.analyzer.analyze(guest_pc, &asm.jit_buf.insts, thumb);
+
+    #[cfg(target_arch = "arm")]
+    if asm.cpu == ARM9 && thumb && crate::reuse_cache::THUMB_TARGETS.contains(&guest_pc) {
+        reuse_key = if !is_os_irq_handler
+            && asm.emu.fs_clear_overlay_image_addr != 0
+            && asm.emu.fs_clear_overlay_image_addr != guest_pc
+        {
+            let mut dependencies = Vec::new();
+            let mut supported = true;
+            for (i, inst) in asm.jit_buf.insts.iter().enumerate() {
+                let pc = guest_pc + i as u32 * 2;
+                let Some(addr) = inst.imm_transfer_addr(pc) else {
+                    continue;
+                };
+
+                let foldable = match inst.op {
+                    Op::Ldr(transfer) | Op::LdrT(transfer) => {
+                        transfer.size() == 2 && !transfer.signed() && asm.analyzer.can_imm_load(addr)
+                    }
+                    _ => false,
+                };
+                if !foldable || (addr & 0xFF000000) != regions::MAIN_OFFSET {
+                    supported = false;
+                    break;
+                }
+
+                // Mirror the ARM32 emitter dependency and value read. These are
+                // ordinary main-RAM reads only; MMIO/VRAM and non-folded accesses
+                // are excluded from this reuse path.
+                asm.emu.jit.main_code_footprint.mark(addr & !3, 4 + (addr & 3) as usize);
+                let value = asm.emu.mem_read::<{ ARM9 }, u32>(addr);
+                dependencies.push((pc, addr, value));
+            }
+
+            if supported {
+                Some(crate::reuse_cache::Key {
+                    pc: guest_pc,
+                    end: guest_pc_end + 2,
+                    thumb: true,
+                    context: [asm.emu.settings.arm7_emu() as u32, asm.emu.fs_clear_overlay_image_addr],
+                    instructions: asm.jit_buf.insts.iter().zip(&asm.jit_buf.insts_cycle_counts).map(|(i, c)| (i.opcode, *c)).collect(),
+                    dependencies,
+                })
+            } else {
+                crate::reuse_cache::excluded();
+                None
+            }
+        } else {
+            crate::reuse_cache::excluded();
+            None
+        };
+
+        if let Some(key) = &reuse_key {
+            if let Some(offset) = asm.emu.jit.reuse_cache.lookup(key, &asm.emu.jit.mem) {
+                let entry = asm.emu.jit_restore_reuse(guest_pc, guest_pc_end + 2, offset, true);
+                // No owned key or cache borrow may survive execution (guest longjmp).
+                drop(reuse_key);
+                asm.runtime_data.pre_cycle_count_sum = 0;
+                crate::perf_diag::publish_arm9_state(guest_pc, crate::perf_diag::PHASE_JIT);
+                let entry: extern "C" fn(u32) = unsafe { mem::transmute(entry) };
+                entry(guest_pc | 1);
+                return;
+            }
+        }
+    }
+
     asm.jit_buf.guest_pc_start = guest_pc;
     asm.jit_buf.debug_info.resize(asm.analyzer.basic_blocks.len(), asm.jit_buf.insts.len());
 
@@ -799,7 +875,8 @@ fn emit_code_block_internal(asm: &mut JitAsm, guest_pc: u32, thumb: bool) {
         }
         #[cfg(target_arch = "arm")]
         if let Some(key) = reuse_key {
-            let offset = insert_entry as usize - asm.emu.jit.mem.as_ptr() as usize;
+            // Thumb entries carry bit0 as an ISA tag; cache the allocation offset itself.
+            let offset = (insert_entry as usize & !1) - asm.emu.jit.mem.as_ptr() as usize;
             asm.emu.jit.reuse_cache.remember(key, offset, host_bytes, &asm.emu.jit.mem);
         }
         if asm.cpu == ARM9 {

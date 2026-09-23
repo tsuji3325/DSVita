@@ -436,7 +436,7 @@ pub(crate) fn write_report() {
 
     let mut report = format!(
         concat!(
-            "report_version=10\n",
+            "report_version=11\n",
             "pc_source=arm9_jit_block_boundary_and_interpreter_entry pc_note=last_guest_boundary_includes_host_helpers_not_instruction_exact\n",
             "slow_threshold_us={} pc_sample_interval_ms=1 pc_bucket_size={} overlay_hint_note=last_FS_ClearOverlayImage_event_not_ownership\n",
             "cpu_frames={} cpu_avg_us={} cpu_max_us={} cpu_slow_frames={} cpu_slow_avg_us={} cpu_slow_max_us={}\n",

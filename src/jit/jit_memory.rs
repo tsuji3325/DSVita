@@ -413,13 +413,14 @@ pub struct JitMemory {
 
 impl Emu {
     #[cfg(target_arch = "arm")]
-    pub(crate) fn jit_restore_reuse(&mut self, pc: u32, end: u32, offset: usize) -> *const extern "C" fn(u32) {
-        let entry = (self.jit.mem.as_ptr() as usize + offset) as *const extern "C" fn(u32);
+    pub(crate) fn jit_restore_reuse(&mut self, pc: u32, end: u32, offset: usize, thumb: bool) -> *const extern "C" fn(u32) {
+        // Cache offsets are untagged allocation offsets. Thumb state lives in bit0 of the entry.
+        let entry = ((self.jit.mem.as_ptr() as usize + offset) | thumb as usize) as *const extern "C" fn(u32);
         self.jit.jit_memory_map.write_jit_entries(pc, (end - pc) as usize, JitEntry(entry));
-        self.jit_set_live_range(pc, end, false);
+        self.jit_set_live_range(pc, end, thumb);
         // Re-establish the normal write backstop for both CPUs before execution.
-        self.jit_protect_region::<{ ARM9 }>(pc, end, false, &regions::MAIN_REGION);
-        self.jit_protect_region::<{ ARM7 }>(pc, end, false, &regions::MAIN_REGION);
+        self.jit_protect_region::<{ ARM9 }>(pc, end, thumb, &regions::MAIN_REGION);
+        self.jit_protect_region::<{ ARM7 }>(pc, end, thumb, &regions::MAIN_REGION);
         entry
     }
 
