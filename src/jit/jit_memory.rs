@@ -1409,15 +1409,17 @@ impl JitMemory {
             return false;
         }
 
+        // Capture the JIT base before borrowing per-instruction metadata mutably.
+        let jit_mem_base = self.mem.as_ptr() as usize;
         let patch_owner = if cpu == ARM9 {
-            self.reuse_cache.native_owner((*host_pc & !1) - self.mem.as_ptr() as usize).unwrap_or(0)
+            self.reuse_cache.native_owner((*host_pc & !1) - jit_mem_base).unwrap_or(0)
         } else { 0 };
         let metadata = self.find_guest_inst_metadata(*host_pc);
         let patch_pc = metadata.pc;
         let patch_write = metadata.s.fast.op.is_write_mem_transfer();
 
         let fast_mem_start = (*host_pc - metadata.s.fast.start_offset as usize) as *mut u8;
-        let patch_offset = fast_mem_start as usize - self.mem.as_ptr() as usize;
+        let patch_offset = fast_mem_start as usize - jit_mem_base;
         let fast_mem = slice::from_raw_parts_mut(fast_mem_start, metadata.s.fast.size as usize);
 
         debug_println!("{cpu:?} slow mem patch at {:x} {:?} addr {guest_memory_addr:x}", metadata.pc, metadata.s.fast.op);
