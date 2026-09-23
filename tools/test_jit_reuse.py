@@ -24,6 +24,11 @@ assert 'asm.emu.mem_read::<{ ARM9 }, u32>(addr)' in asm
 assert 'end: guest_pc_end + 2' in asm and 'thumb: true' in asm
 assert 'entry(guest_pc | 1);' in asm
 assert '(insert_entry as usize & !1)' in asm
+assert 'accept_known_patch(' in memory
+assert 'patch_offset,' in memory and 'fast_mem,' in memory
+patch_body=memory[memory.index('pub unsafe fn patch_slow_mem'):memory.index('\n    }\n}',memory.index('pub unsafe fn patch_slow_mem'))]
+assert '.to_vec()' not in patch_body and 'Mutex' not in patch_body
+assert memory.index('execute_patch_slow_mem::<true>') < memory.index('accept_known_patch(',memory.index('pub unsafe fn patch_slow_mem'))
 assert asm.index('drop(reuse_key);') < asm.index('entry(guest_pc);')
 
 start=memory.index('    pub(crate) fn jit_restore_reuse(')
