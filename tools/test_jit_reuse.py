@@ -19,8 +19,9 @@ assert 'crate::reuse_cache::ARM_TARGETS.contains(&guest_pc)' in asm
 assert 'crate::reuse_cache::THUMB_TARGETS.contains(&guest_pc)' in asm
 reuse = Path('src/reuse_cache.rs').read_text()
 assert '0x02203714' in reuse and '0x021F2E34' in reuse
-assert 'THUMB_TARGETS: [u32; 4]' in reuse
-assert 'entries: [Option<Entry>; 8]' in reuse
+assert '0x021F6AF4' in reuse and '0x021F7234' in reuse
+assert 'THUMB_TARGETS: [u32; 6]' in reuse
+assert 'entries: [Option<Entry>; 10]' in reuse
 assert 'inst.imm_transfer_addr(guest_pc + i as u32 * 4).is_none()' in asm
 assert 'asm.analyzer.can_imm_load(addr)' in asm
 assert '(addr & 0xFF000000) != regions::MAIN_OFFSET' in asm
