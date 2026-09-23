@@ -1430,7 +1430,7 @@ impl JitMemory {
         } else {
             Self::execute_patch_slow_mem::<false>(host_pc, guest_memory_addr, fast_mem, metadata, cpu);
         }
-        // Only the two hardware-confirmed FAED6 MMIO patch windows may advance
+        // Only hardware-confirmed FAED6/E8CC MMIO patch windows may advance
         // the saved native snapshot, and only in this same allocation. No allocation,
         // file I/O or global write tracing is added to the fault path.
         self.reuse_cache.accept_known_patch(
