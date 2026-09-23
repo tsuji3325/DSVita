@@ -24,6 +24,10 @@ impl Cache {
         self.entries = Default::default();
         CLEARS.fetch_add(1, Relaxed);
     }
+    /// Observer only: used by the fault handler before touching patch metadata.
+    pub fn native_owner(&self, offset: usize) -> Option<u32> {
+        self.entries.iter().flatten().find(|e| offset >= e.offset && offset - e.offset < e.native.len()).map(|e| e.key.pc)
+    }
     pub fn lookup(&self, key: &Key, memory: &[u8]) -> Option<usize> {
         let i = TARGETS.iter().position(|p| *p == key.pc)?;
         let Some(e) = &self.entries[i] else { MISSES.fetch_add(1, Relaxed); return None; };
@@ -62,9 +66,15 @@ mod tests {
         let mut c=Cache::default(); let m=vec![7;128];
         c.remember(key(),16,32,&m);
         assert_eq!(c.lookup(&key(),&m),Some(16));
+        assert_eq!(c.native_owner(16),Some(TARGETS[0]));
+        assert_eq!(c.native_owner(47),Some(TARGETS[0]));
+        assert_eq!(c.native_owner(15),None);assert_eq!(c.native_owner(48),None);
         let mut changed=key(); changed.instructions[0].0 ^= 1;
         assert_eq!(c.lookup(&changed,&m),None);
         assert_eq!(c.lookup(&key(),&m),Some(16));
+        assert_eq!(c.native_owner(16),Some(TARGETS[0]));
+        assert_eq!(c.native_owner(47),Some(TARGETS[0]));
+        assert_eq!(c.native_owner(15),None);assert_eq!(c.native_owner(48),None);
         let mut changed=key(); changed.instructions[0].1=2;
         assert_eq!(c.lookup(&changed,&m),None);
         let mut changed=key(); changed.end+=4;
@@ -80,6 +90,7 @@ mod tests {
         c.remember(key(),16,32,&m); m[20]=8;
         assert_eq!(c.lookup(&key(),&m),None);
         m[20]=7; c.clear();
+        assert_eq!(c.native_owner(16),None);
         assert_eq!(c.lookup(&key(),&m),None);
         c.remember(key(),120,32,&m);
         assert_eq!(c.lookup(&key(),&m),None);

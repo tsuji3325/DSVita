@@ -76,6 +76,7 @@ mod compile_diag;
 mod write_diag;
 mod dependency_diag;
 mod reuse_cache;
+mod compile_focus;
 mod ra_context;
 mod savestate;
 mod screen_layouts;

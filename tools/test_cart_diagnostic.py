@@ -151,6 +151,7 @@ with tempfile.TemporaryDirectory() as tmp:
     code += '\n#[path = ' + repr(str(Path('src/write_diag.rs').resolve())).replace("'", '"') + '] mod write_diag;\n'
     code += '\n#[path = ' + repr(str(Path('src/dependency_diag.rs').resolve())).replace("'", '"') + '] mod dependency_diag;\n'
     code += '\n#[path = ' + repr(str(Path('src/reuse_cache.rs').resolve())).replace("'", '"') + '] mod reuse_cache;\n'
+    code += '\n#[path = ' + repr(str(Path('src/compile_focus.rs').resolve())).replace("'", '"') + '] mod compile_focus;\n'
     code += 'impl Emu<false> {\n' + '\n'.join(method(before,n) for n in names) + '\n}\n'
     code += 'impl Emu<true> {\n' + '\n'.join(method(after,n) for n in names+[n+'_inner' for n in names]) + '\n}\n'
     code += tests

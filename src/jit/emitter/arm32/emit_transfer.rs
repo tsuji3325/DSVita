@@ -176,6 +176,9 @@ impl JitAsm<'_> {
                         ARM9 => self.emu.mem_read::<{ ARM9 }, u32>(imm_addr),
                         ARM7 => self.emu.mem_read::<{ ARM7 }, u32>(imm_addr),
                     };
+                    if self.cpu == ARM9 && crate::compile_focus::watched(self.jit_buf.guest_pc_start, block_asm.thumb) {
+                        crate::compile_focus::folded(self.jit_buf.guest_pc_start, block_asm.current_pc, imm_addr, imm_value);
+                    }
                     block_asm.ldr2(value_reg, imm_value);
                     return;
                 }

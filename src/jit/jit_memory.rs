@@ -1408,7 +1408,12 @@ impl JitMemory {
             return false;
         }
 
+        let patch_owner = if cpu == ARM9 {
+            self.reuse_cache.native_owner((*host_pc & !1) - self.mem.as_ptr() as usize).unwrap_or(0)
+        } else { 0 };
         let metadata = self.find_guest_inst_metadata(*host_pc);
+        let patch_pc = metadata.pc;
+        let patch_write = metadata.s.fast.op.is_write_mem_transfer();
 
         let fast_mem_start = (*host_pc - metadata.s.fast.start_offset as usize) as *mut u8;
         let fast_mem = slice::from_raw_parts_mut(fast_mem_start, metadata.s.fast.size as usize);
@@ -1421,6 +1426,7 @@ impl JitMemory {
         } else {
             Self::execute_patch_slow_mem::<false>(host_pc, guest_memory_addr, fast_mem, metadata, cpu);
         }
+        crate::compile_focus::patched(patch_owner, patch_pc, guest_memory_addr, patch_write);
         true
     }
 }

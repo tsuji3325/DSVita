@@ -696,6 +696,16 @@ fn emit_code_block_internal(asm: &mut JitAsm, guest_pc: u32, thumb: bool) {
     let decode_us = crate::compile_diag::elapsed(decode_start);
     if asm.cpu == ARM9 { crate::compile_diag::decoded(guest_pc | thumb as u32, decode_us); }
 
+    let focus = asm.cpu == ARM9 && crate::compile_focus::watched(guest_pc, thumb);
+    if focus {
+        crate::compile_focus::decoded(guest_pc, guest_pc_end + 2,
+            asm.jit_buf.insts.iter().zip(&asm.jit_buf.insts_cycle_counts).map(|(inst, cycles)| (inst.opcode, *cycles)),
+            asm.jit_buf.insts.iter().enumerate().filter_map(|(i, inst)| {
+                let pc = guest_pc + i as u32 * 2;
+                inst.imm_transfer_addr(pc).map(|addr| (pc, addr))
+            }));
+    }
+
     if asm.cpu == ARM9 && is_os_irq_handler && asm.emit_hle_os_irq_handler(guest_pc, thumb) {
         return;
     }
@@ -770,15 +780,23 @@ fn emit_code_block_internal(asm: &mut JitAsm, guest_pc: u32, thumb: bool) {
 
         asm.emit_fs_clear_overlay_image_hook(guest_pc, thumb, &mut block_asm);
 
+        let focus_setup_us = if focus { crate::compile_diag::elapsed(emit_start) } else { 0 };
+        let focus_emit_start = crate::compile_diag::clock(focus);
         asm.emit(&mut block_asm, thumb);
+        let focus_emit_us = crate::compile_diag::elapsed(focus_emit_start);
 
+        let focus_finalize_start = crate::compile_diag::clock(focus);
         block_asm.finalize();
+        let focus_finalize_us = crate::compile_diag::elapsed(focus_finalize_start);
 
         let emit_us = crate::compile_diag::elapsed(emit_start);
         let host_bytes = block_asm.get_code_buffer().len();
         let insert_start = crate::compile_diag::clock(asm.cpu == ARM9);
         let (insert_entry, flushed) = asm.emu.jit_insert_block(block_asm, &asm.jit_buf.debug_info, guest_pc, guest_pc_end + pc_step, thumb, asm.cpu);
         let insert_us = crate::compile_diag::elapsed(insert_start);
+        if focus {
+            crate::compile_focus::compiled(guest_pc, [focus_setup_us, focus_emit_us, focus_finalize_us, insert_us], asm.analyzer.basic_blocks.len(), host_bytes);
+        }
         #[cfg(target_arch = "arm")]
         if let Some(key) = reuse_key {
             let offset = insert_entry as usize - asm.emu.jit.mem.as_ptr() as usize;
