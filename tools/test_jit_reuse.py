@@ -21,8 +21,9 @@ reuse = Path('src/reuse_cache.rs').read_text()
 assert '0x02203714' in reuse and '0x021F2E34' in reuse
 assert '0x021F6AF4' in reuse and '0x021F7234' in reuse
 assert '0x021F81A0' in reuse and '0x021F994C' in reuse
-assert 'THUMB_TARGETS: [u32; 8]' in reuse
-assert 'entries: [Option<Entry>; 12]' in reuse
+assert '0x021FC8FC' in reuse and '0x022048A4' in reuse
+assert 'THUMB_TARGETS: [u32; 10]' in reuse
+assert 'entries: [Option<Entry>; 14]' in reuse
 assert 'inst.imm_transfer_addr(guest_pc + i as u32 * 4).is_none()' in asm
 assert 'asm.analyzer.can_imm_load(addr)' in asm
 assert '(addr & 0xFF000000) != regions::MAIN_OFFSET' in asm
