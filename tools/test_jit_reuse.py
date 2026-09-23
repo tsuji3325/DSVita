@@ -25,6 +25,8 @@ assert 'end: guest_pc_end + 2' in asm and 'thumb: true' in asm
 assert 'entry(guest_pc | 1);' in asm
 assert '(insert_entry as usize & !1)' in asm
 assert 'accept_known_patch(' in memory
+assert '0x0225E8CC' in Path('src/reuse_cache.rs').read_text()
+assert '0x04100010' in Path('src/reuse_cache.rs').read_text()
 assert 'patch_offset,' in memory and 'fast_mem,' in memory
 patch_body=memory[memory.index('pub unsafe fn patch_slow_mem'):memory.index('\n    }\n}',memory.index('pub unsafe fn patch_slow_mem'))]
 assert '.to_vec()' not in patch_body and 'Mutex' not in patch_body
