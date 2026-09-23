@@ -1,7 +1,7 @@
 //! Bounded compile-time observers. Never read extra guest memory for diagnostics.
 use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
-pub(crate) const TARGETS: [u32; 2] = [0x02203714, 0x021F2E34];
+pub(crate) const TARGETS: [u32; 2] = [0x021F6AF4, 0x021F7234];
 const LIMIT: usize = 512;
 const IMMEDIATE_LIMIT: usize = 64;
 #[derive(Default)]
@@ -92,7 +92,7 @@ pub(crate) fn reset() {
 }
 pub(crate) fn append_report(out:&mut String) {
     let s=state().lock().unwrap();
-    out.push_str("[compile_focus]\nscope=next_two_ARM9_Thumb_overlay_hotspots fresh_decode_identity_no_extra_guest_reads timing_units=us stages=setup,emit,finalize,insert last_immediates_are_addresses_not_values identity_includes_cycles_not_external_data\n");
+    out.push_str("[compile_focus]\nscope=next2_ARM9_Thumb_overlay_hotspots fresh_decode_identity_no_extra_guest_reads timing_units=us stages=setup,emit,finalize,insert last_immediates_are_addresses_not_values identity_includes_cycles_not_external_data\n");
     for (i,t) in s.iter().enumerate() {
         out.push_str(&format!("pc=0x{:08X} decodes={} repeat_same={} repeat_changed={} different_extent={} unsupported={} compiles={} last_inst_count={} last_basic_blocks={} last_host_bytes={} setup_us={} emit_us={} finalize_us={} insert_us={} setup_max_us={} emit_max_us={} finalize_max_us={} insert_max_us={} last_immediate_operands={} reported_immediates={}\n",TARGETS[i],t.decodes,t.same,t.changed,t.extent,t.unsupported,t.compiles,t.inst_count,t.blocks,t.host_bytes,t.times[0],t.times[1],t.times[2],t.times[3],t.maxima[0],t.maxima[1],t.maxima[2],t.maxima[3],t.immediate_count,t.immediate.len()));
         for (pc,addr) in &t.immediate {out.push_str(&format!("target=0x{:08X} last_immediate_pc=0x{pc:08X} address=0x{addr:08X}\n",TARGETS[i]));}
