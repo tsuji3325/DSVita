@@ -607,7 +607,7 @@ mod tests {
         assert!(!std::path::Path::new("frame_perf.log").exists());
         write_report();
         let report = std::fs::read_to_string("frame_perf.log").unwrap();
-        assert!(report.contains("report_version=10"));
+        assert!(report.contains("report_version=11"));
         assert!(report.contains("cpu_slow_frames=1"));
         assert!(report.contains("[top_slow_pc_buckets]"));
         assert!(report.contains("[slow_phase_samples]"));
