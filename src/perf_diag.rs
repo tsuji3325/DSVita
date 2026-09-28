@@ -59,6 +59,15 @@ const SLOW_OTHER_RENDER_US: usize = 44;
 
 const STAT_COUNT: usize = 45;
 static STATS: [AtomicU32; STAT_COUNT] = [const { AtomicU32::new(0) }; STAT_COUNT];
+// Opt-in 2D diagnostic: guest VBlanks observed in normal/synchronized mode,
+// scanline-262 and VBlank wait costs, and safe fallbacks after a timeout.
+static SYNC2D_NORMAL_VBLANKS: AtomicU32 = AtomicU32::new(0);
+static SYNC2D_FORCED_VBLANKS: AtomicU32 = AtomicU32::new(0);
+static SYNC2D_UNSAMPLED_NORMAL: AtomicU32 = AtomicU32::new(0);
+static SYNC2D_UNSAMPLED_FORCED: AtomicU32 = AtomicU32::new(0);
+static SYNC2D_VBLANK_WAIT_US: AtomicU32 = AtomicU32::new(0);
+static SYNC2D_RELOAD_WAIT_US: AtomicU32 = AtomicU32::new(0);
+static SYNC2D_TIMEOUTS: AtomicU32 = AtomicU32::new(0);
 
 // Low six bits hold the execution phase; upper bits hold the 64-byte PC bucket.
 // One atomic read gives a coherent PC/phase pair, including across JIT edges.
@@ -183,8 +192,27 @@ fn merge_histogram(target: &Mutex<BTreeMap<u64, u32>>, source: &BTreeMap<u64, u3
 
 pub(crate) fn record_preserved_main_write() { single_writer_add(&PRESERVED_MAIN_WRITES, 1); }
 
+pub(crate) fn record_2d_sync_vblank(forced: bool, sampled: bool) {
+    let (count, unsampled) = if forced {
+        (&SYNC2D_FORCED_VBLANKS, &SYNC2D_UNSAMPLED_FORCED)
+    } else {
+        (&SYNC2D_NORMAL_VBLANKS, &SYNC2D_UNSAMPLED_NORMAL)
+    };
+    count.fetch_add(1, Ordering::Relaxed);
+    if !sampled { unsampled.fetch_add(1, Ordering::Relaxed); }
+}
+
+pub(crate) fn record_2d_sync_wait(at_reload: bool, wait_us: u32, completed: bool) {
+    let target = if at_reload { &SYNC2D_RELOAD_WAIT_US } else { &SYNC2D_VBLANK_WAIT_US };
+    target.fetch_add(wait_us, Ordering::Relaxed);
+    if !completed { SYNC2D_TIMEOUTS.fetch_add(1, Ordering::Relaxed); }
+}
+
 pub(crate) fn reset() {
     PRESERVED_MAIN_WRITES.store(0, Ordering::Relaxed);
+    for slot in [&SYNC2D_NORMAL_VBLANKS, &SYNC2D_FORCED_VBLANKS, &SYNC2D_UNSAMPLED_NORMAL, &SYNC2D_UNSAMPLED_FORCED, &SYNC2D_VBLANK_WAIT_US, &SYNC2D_RELOAD_WAIT_US, &SYNC2D_TIMEOUTS] {
+        slot.store(0, Ordering::Relaxed);
+    }
     crate::compile_diag::reset();
     crate::write_diag::reset();
     crate::dependency_diag::reset();
@@ -437,7 +465,7 @@ pub(crate) fn write_report() {
 
     let mut report = format!(
         concat!(
-            "report_version=23\n",
+            "report_version=24\n",
             "pc_source=arm9_jit_block_boundary_and_interpreter_entry pc_note=last_guest_boundary_includes_host_helpers_not_instruction_exact\n",
             "slow_threshold_us={} pc_sample_interval_ms=1 pc_bucket_size={} overlay_hint_note=last_FS_ClearOverlayImage_event_not_ownership\n",
             "cpu_frames={} cpu_avg_us={} cpu_max_us={} cpu_slow_frames={} cpu_slow_avg_us={} cpu_slow_max_us={}\n",
@@ -512,6 +540,16 @@ pub(crate) fn write_report() {
         report.push_str(&format!("{} all={} slow={}\n", CART_NAMES[index], all, slow));
     }
 
+    report.push_str(&format!(
+        "[2d_frame_sync_diagnostic]\nnormal_guest_vblanks={} normal_unsampled_vblanks={} forced_guest_vblanks={} forced_unsampled_vblanks={} forced_vblank_wait_total_us={} forced_reload_wait_total_us={} forced_wait_timeouts={}\nnote=forced_mode_waits_for_render_completion_at_vblank_and_scanline262 default_off render_timeout_falls_back_to_safe_skip\n",
+        SYNC2D_NORMAL_VBLANKS.load(Ordering::Relaxed),
+        SYNC2D_UNSAMPLED_NORMAL.load(Ordering::Relaxed),
+        SYNC2D_FORCED_VBLANKS.load(Ordering::Relaxed),
+        SYNC2D_UNSAMPLED_FORCED.load(Ordering::Relaxed),
+        SYNC2D_VBLANK_WAIT_US.load(Ordering::Relaxed),
+        SYNC2D_RELOAD_WAIT_US.load(Ordering::Relaxed),
+        SYNC2D_TIMEOUTS.load(Ordering::Relaxed),
+    ));
     crate::compile_diag::append_report(&mut report);
     crate::reuse_cache::append_report(&mut report);
     crate::compile_focus::append_report(&mut report);
@@ -609,7 +647,8 @@ mod tests {
         assert!(!std::path::Path::new("frame_perf.log").exists());
         write_report();
         let report = std::fs::read_to_string("frame_perf.log").unwrap();
-        assert!(report.contains("report_version=23"));
+        assert!(report.contains("report_version=24"));
+        assert!(report.contains("[2d_frame_sync_diagnostic]"));
         assert!(report.contains("cpu_slow_frames=1"));
         assert!(report.contains("[top_slow_pc_buckets]"));
         assert!(report.contains("[slow_phase_samples]"));
