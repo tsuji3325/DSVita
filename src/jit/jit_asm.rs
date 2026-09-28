@@ -721,6 +721,9 @@ fn emit_code_block_internal(asm: &mut JitAsm, guest_pc: u32, thumb: bool) {
     // candidates are checked after analysis so their folded main-RAM literals can
     // be included in the cache identity without changing the ARM fast path.
     #[cfg(target_arch = "arm")]
+    let mut generic_key_observed = false;
+
+    #[cfg(target_arch = "arm")]
     let mut reuse_key = if asm.cpu == ARM9 && !thumb && crate::reuse_cache::ARM_TARGETS.contains(&guest_pc) {
         if !is_os_irq_handler && asm.emu.fs_clear_overlay_image_addr != 0
             && asm.emu.fs_clear_overlay_image_addr != guest_pc
@@ -743,6 +746,8 @@ fn emit_code_block_internal(asm: &mut JitAsm, guest_pc: u32, thumb: bool) {
 
     #[cfg(target_arch = "arm")]
     if let Some(key) = &reuse_key {
+        crate::generic_reuse_diag::observe_existing_key(key);
+        generic_key_observed = true;
         if let Some(offset) = asm.emu.jit.reuse_cache.lookup(key, &asm.emu.jit.mem) {
             let entry = asm.emu.jit_restore_reuse(guest_pc, guest_pc_end + 4, offset, false);
             // No owned key or cache borrow may survive execution (guest longjmp).
@@ -810,6 +815,8 @@ fn emit_code_block_internal(asm: &mut JitAsm, guest_pc: u32, thumb: bool) {
         };
 
         if let Some(key) = &reuse_key {
+            crate::generic_reuse_diag::observe_existing_key(key);
+            generic_key_observed = true;
             if let Some(offset) = asm.emu.jit.reuse_cache.lookup(key, &asm.emu.jit.mem) {
                 let entry = asm.emu.jit_restore_reuse(guest_pc, guest_pc_end + 2, offset, true);
                 // No owned key or cache borrow may survive execution (guest longjmp).
@@ -822,6 +829,59 @@ fn emit_code_block_internal(asm: &mut JitAsm, guest_pc: u32, thumb: bool) {
             }
         }
     }
+
+    #[cfg(target_arch = "arm")]
+    let generic_profile_compile = if asm.cpu == ARM9 && !generic_key_observed {
+        let fs_clear = asm.emu.fs_clear_overlay_image_addr;
+        if is_os_irq_handler || (fs_clear != 0 && fs_clear == guest_pc) {
+            crate::generic_reuse_diag::unsupported_guard();
+            false
+        } else {
+            let mut expected_deps = 0usize;
+            let supported = if thumb {
+                let mut ok = true;
+                for (i, inst) in asm.jit_buf.insts.iter().enumerate() {
+                    let pc = guest_pc + i as u32 * 2;
+                    let Some(addr) = inst.imm_transfer_addr(pc) else { continue; };
+                    let foldable = match inst.op {
+                        Op::Ldr(transfer) | Op::LdrT(transfer) => {
+                            transfer.size() == 2
+                                && !transfer.signed()
+                                && asm.analyzer.can_imm_load(addr)
+                        }
+                        _ => false,
+                    };
+                    if !foldable || (addr & 0xFF000000) != regions::MAIN_OFFSET {
+                        ok = false;
+                        break;
+                    }
+                    expected_deps += 1;
+                }
+                ok
+            } else {
+                asm.jit_buf.insts.iter().enumerate().all(|(i, inst)| {
+                    inst.imm_transfer_addr(guest_pc + i as u32 * 4).is_none()
+                })
+            };
+
+            if supported {
+                crate::generic_reuse_diag::begin_compile(
+                    guest_pc,
+                    guest_pc_end + if thumb { 2 } else { 4 },
+                    thumb,
+                    [asm.emu.settings.arm7_emu() as u32, fs_clear],
+                    asm.jit_buf.insts.iter().zip(&asm.jit_buf.insts_cycle_counts)
+                        .map(|(inst, cycles)| (inst.opcode, *cycles)),
+                    expected_deps,
+                )
+            } else {
+                crate::generic_reuse_diag::unsupported_shape();
+                false
+            }
+        }
+    } else {
+        false
+    };
 
     asm.jit_buf.guest_pc_start = guest_pc;
     asm.jit_buf.debug_info.resize(asm.analyzer.basic_blocks.len(), asm.jit_buf.insts.len());
@@ -878,6 +938,14 @@ fn emit_code_block_internal(asm: &mut JitAsm, guest_pc: u32, thumb: bool) {
             // Thumb entries carry bit0 as an ISA tag; cache the allocation offset itself.
             let offset = (insert_entry as usize & !1) - asm.emu.jit.mem.as_ptr() as usize;
             asm.emu.jit.reuse_cache.remember(key, offset, host_bytes, &asm.emu.jit.mem);
+        }
+        #[cfg(target_arch = "arm")]
+        if generic_profile_compile {
+            crate::generic_reuse_diag::finish_compile(
+                guest_pc,
+                thumb,
+                decode_us.saturating_add(analyze_us).saturating_add(emit_us).saturating_add(insert_us),
+            );
         }
         if asm.cpu == ARM9 {
             crate::compile_diag::compiled(guest_pc | thumb as u32, guest_pc_end + pc_step, host_bytes, [decode_us, analyze_us, emit_us, insert_us], crate::perf_diag::overlay_hint());
