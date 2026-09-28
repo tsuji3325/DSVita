@@ -292,6 +292,7 @@ impl Emu {
                 let palettes = self.mem_get_palettes();
                 let oam = self.mem_get_oam();
 
+                let force_2d_frame_sync = self.settings.frame_sync_2d_diagnostic();
                 self.gpu.renderer.on_scanline_finish(
                     &mut self.mem.vram.banks,
                     palettes,
@@ -301,6 +302,7 @@ impl Emu {
                     &mut self.gpu.gpu_3d_regs,
                     !self.settings.geometry_3d_skip(),
                     &mut self.breakout_imm,
+                    force_2d_frame_sync,
                 );
 
                 if self.gpu.gpu_3d_regs.is_flushed() {
@@ -330,7 +332,7 @@ impl Emu {
                 for i in 0..2 {
                     self.gpu.disp_stat[i].set_v_blank_flag(false);
                 }
-                self.gpu.renderer.reload_registers(&self.mem.vram);
+                self.gpu.renderer.reload_registers(&self.mem.vram, self.settings.frame_sync_2d_diagnostic());
             }
             263 => {
                 self.gpu.frame_rate_counter.on_frame_ready();
