@@ -179,6 +179,15 @@ impl JitAsm<'_> {
                     if self.cpu == ARM9 && crate::compile_focus::watched(self.jit_buf.guest_pc_start, block_asm.thumb) {
                         crate::compile_focus::folded(self.jit_buf.guest_pc_start, block_asm.current_pc, imm_addr, imm_value);
                     }
+                    if self.cpu == ARM9 {
+                        crate::generic_reuse_diag::folded(
+                            self.jit_buf.guest_pc_start,
+                            block_asm.thumb,
+                            block_asm.current_pc,
+                            imm_addr,
+                            imm_value,
+                        );
+                    }
                     block_asm.ldr2(value_reg, imm_value);
                     return;
                 }
