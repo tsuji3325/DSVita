@@ -154,7 +154,8 @@ pub(crate) fn reset() {
 /// Count a block that cannot enter the current conservative generic policy because
 /// of lifecycle/HLE conditions. No per-PC allocation is performed for rejects.
 pub(crate) fn unsupported_guard() {
-    state().lock().unwrap().unsupported_guard = state().lock().unwrap().unsupported_guard.saturating_add(1);
+    let mut s = state().lock().unwrap();
+    s.unsupported_guard = s.unsupported_guard.saturating_add(1);
 }
 
 /// Count a decoded block whose immediate-memory shape is not supported by the
