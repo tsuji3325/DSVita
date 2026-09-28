@@ -170,6 +170,10 @@ pub struct GpuRenderer {
 
     rendering: Mutex<bool>,
     rendering_condvar: Condvar,
+    // Diagnostic mode can wait for the *entire* frame, including capture and
+    // post-present cleanup; rendering=false alone is set before that work.
+    render_frame_complete: AtomicBool,
+    render_complete_condvar: Condvar,
 
     processed_3d: Mutex<bool>,
     processed_3d_condvar: Condvar,
@@ -299,6 +303,8 @@ impl GpuRenderer {
 
             rendering: Mutex::new(false),
             rendering_condvar: Condvar::new(),
+            render_frame_complete: AtomicBool::new(true),
+            render_complete_condvar: Condvar::new(),
 
             processed_3d: Mutex::new(false),
             processed_3d_condvar: Condvar::new(),
@@ -329,6 +335,7 @@ impl GpuRenderer {
         self.common.pow_cnt1[0] = PowCnt1::from(0);
         *self.processed_3d.lock().unwrap() = false;
         *self.rendering.lock().unwrap() = false;
+        self.render_frame_complete.store(true, Ordering::Release);
         self.renderer_vram_busy.store(false, Ordering::SeqCst);
         self.sample_2d = true;
         self.ready_2d = false;
@@ -346,6 +353,27 @@ impl GpuRenderer {
         }
     }
 
+    // The opt-in diagnostic deliberately applies backpressure rather than
+    // copying queued VRAM/OAM over a buffer the renderer may still read.
+    // On a stalled renderer it times out and keeps the normal safe skip path.
+    fn wait_for_completed_frame(&self, at_reload: bool) -> bool {
+        let start = Instant::now();
+        let rendering = self.rendering.lock().unwrap();
+        let (rendering, _timeout) = self.render_complete_condvar
+            .wait_timeout_while(rendering, Duration::from_millis(1000), |busy| {
+                (*busy || !self.render_frame_complete.load(Ordering::Acquire)) && !self.is_quit()
+            })
+            .unwrap();
+        let complete = !self.is_quit() && !*rendering && self.render_frame_complete.load(Ordering::Acquire);
+        drop(rendering);
+        crate::perf_diag::record_2d_sync_wait(
+            at_reload,
+            start.elapsed().as_micros().min(u32::MAX as u128) as u32,
+            complete,
+        );
+        complete
+    }
+
     pub fn on_scanline_finish(
         &mut self,
         vram_banks: &mut VramBanks,
@@ -356,7 +384,16 @@ impl GpuRenderer {
         registers_3d: &mut Gpu3DRegisters,
         sync_3d: bool,
         breakout_imm: &mut bool,
+        force_2d_frame_sync: bool,
     ) {
+        // Count unsampled guest frames for both sides of the A/B comparison.
+        crate::perf_diag::record_2d_sync_vblank(force_2d_frame_sync, self.sample_2d);
+        if force_2d_frame_sync && !self.wait_for_completed_frame(false) {
+            if self.is_quit() {
+                *breakout_imm = true;
+            }
+            return;
+        }
         if self.sample_2d {
             trace_2d(Trace2D::Snapshot);
             self.common.mem_buf.read_vram(vram_banks);
@@ -393,6 +430,7 @@ impl GpuRenderer {
             self.sample_2d = false;
             self.renderer_3d.on_render_start();
             self.renderer_vram_busy.store(true, Ordering::SeqCst);
+            self.render_frame_complete.store(false, Ordering::Release);
             *rendering = true;
             self.rendering_condvar.notify_all();
         }
@@ -402,7 +440,12 @@ impl GpuRenderer {
         self.common.disp_cap_cnt[1]
     }
 
-    pub fn reload_registers(&mut self, vram: &Vram) {
+    pub fn reload_registers(&mut self, vram: &Vram, force_2d_frame_sync: bool) {
+        // Wait at scanline 262, before sampling the next frame's per-line 2D
+        // registers. Waiting only at VBlank would be too late to recover them.
+        if force_2d_frame_sync && !self.wait_for_completed_frame(true) {
+            return;
+        }
         trace_2d(if self.ready_2d {
             Trace2D::ReloadSkipReady
         } else if self.renderer_vram_busy.load(Ordering::SeqCst) {
@@ -1077,6 +1120,10 @@ impl GpuRenderer {
                 self.average_render_time = self.render_time_sum / 30;
                 self.render_time_sum = 0;
             }
+            // Locking the same mutex as the waiter prevents a missed wakeup.
+            let _rendering = self.rendering.lock().unwrap();
+            self.render_frame_complete.store(true, Ordering::Release);
+            self.render_complete_condvar.notify_all();
         }
     }
 
@@ -1223,5 +1270,8 @@ impl GpuRenderer {
 
     pub fn set_quit(&self, value: bool) {
         self.quit.store(value, Ordering::Relaxed);
+        if value {
+            self.render_complete_condvar.notify_all();
+        }
     }
 }
