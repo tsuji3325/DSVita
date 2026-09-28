@@ -39,6 +39,14 @@ patch_body=memory[memory.index('pub unsafe fn patch_slow_mem'):memory.index('\n 
 assert '.to_vec()' not in patch_body and 'Mutex' not in patch_body
 assert memory.index('execute_patch_slow_mem::<true>') < memory.index('accept_known_patch(',memory.index('pub unsafe fn patch_slow_mem'))
 assert asm.index('drop(reuse_key);') < asm.index('entry(guest_pc);')
+generic = Path('src/generic_reuse_diag.rs').read_text()
+assert 'mode=diagnostic_only auto_reuse=false' in generic
+assert 'extra_guest_reads=false' in generic
+assert 'crate::generic_reuse_diag::observe_existing_key(key);' in asm
+assert 'crate::generic_reuse_diag::begin_compile(' in asm
+assert 'crate::generic_reuse_diag::finish_compile(' in asm
+emitter = Path('src/jit/emitter/arm32/emit_transfer.rs').read_text()
+assert 'crate::generic_reuse_diag::folded(' in emitter
 
 start=memory.index('    pub(crate) fn jit_restore_reuse(')
 pos=memory.index('{',start)+1
@@ -90,6 +98,7 @@ fn restored_thumb_entry_sets_bit_zero_and_uses_thumb_ranges() {
 with tempfile.TemporaryDirectory() as tmp:
     tmp=Path(tmp)
     module='\n#[path = "'+str(Path('src/reuse_cache.rs').resolve())+'"] mod reuse_cache;\n'
+    module+='#[path = "'+str(Path('src/generic_reuse_diag.rs').resolve())+'"] mod generic_reuse_diag;\n'
     src=tmp/'reuse.rs'; src.write_text(prefix+module+'impl Emu {\n'+restore+'\n}\n'+tests)
     exe=tmp/'reuse'
     subprocess.run(['rustc','+stable','--edition=2021','--test',str(src),'-o',str(exe)],check=True)
