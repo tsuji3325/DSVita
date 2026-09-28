@@ -290,6 +290,7 @@ pub(crate) enum SettingId {
     RearTouch,
     ShowDebugStatistics,
     Retroachievements,
+    FrameSync2DDiagnostic,
 }
 
 impl SettingId {
@@ -375,6 +376,13 @@ impl SettingId {
             ),
             SettingId::ShowDebugStatistics => Setting::new("Show debug statistics", "Show FPS and other debug information while playing.", SettingValue::Bool(true), true, SettingGroup::System),
             SettingId::Retroachievements => Setting::new("Retroachievements", "Enables RetroAchievements. Log in first via Global settings.", SettingValue::Bool(true), false, SettingGroup::System),
+            SettingId::FrameSync2DDiagnostic => Setting::new(
+                "Synchronize 2D frames (diagnostic)",
+                "Waits for each 2D render to finish before taking the next frame. Helps diagnose sprite flickering. May slow gameplay; not a speed optimization.",
+                SettingValue::Bool(false),
+                true,
+                SettingGroup::Graphics,
+            ),
         }
     }
 }
@@ -476,6 +484,10 @@ impl Settings {
 
     pub fn geometry_3d_skip(&self) -> bool {
         unsafe { self.0[SettingId::Geometry3DSkip as usize].value.as_bool().unwrap_unchecked() }
+    }
+
+    pub fn frame_sync_2d_diagnostic(&self) -> bool {
+        unsafe { self.0[SettingId::FrameSync2DDiagnostic as usize].value.as_bool().unwrap_unchecked() }
     }
 
     pub fn upscale_3d_factor(&self) -> u8 {
